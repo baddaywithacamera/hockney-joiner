@@ -1,15 +1,21 @@
 """
-model_fetch.py — Download LightGlue from HuggingFace.
+model_fetch.py — Download LightGlue weights.
 
-Downloads a pinned, checksum-verified version once at install time.
-After that the tool runs fully offline.
+LightGlue downloads its own weights from GitHub releases on first use.
+We trigger that download explicitly here so it happens once, with a
+progress dialog, rather than silently mid-session.
 
-Model stored in /models inside the application folder.
+Weights land in torch's hub cache (~/.cache/torch/hub/checkpoints/).
+Once downloaded, the tool runs fully offline.
+
+Download size:
+  SuperPoint extractor:   ~5 MB
+  LightGlue matcher:      ~45 MB
+  Total:                  ~50 MB
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from pathlib import Path
 
@@ -17,30 +23,14 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 log = logging.getLogger(__name__)
 
-# ── Pinned model config ────────────────────────────────────────────────────────
-# Update these when bumping the model version.
-
-LIGHTGLUE_REPO = "cvg/LightGlue"
-LIGHTGLUE_FILES = [
-    "superpoint_lightglue.pth",
-    "disk_lightglue.pth",
-]
-
-# SHA-256 checksums for each file (update when pinning a new version)
-CHECKSUMS: dict[str, str] = {
-    # "superpoint_lightglue.pth": "abc123...",
-    # Fill in after first verified download
-}
-
 READY_MARKER = "lightglue_ready"
 
 
-# ── Downloader ─────────────────────────────────────────────────────────────────
-
 class ModelDownloadWorker(QThread):
     """
-    Background thread that downloads LightGlue from HuggingFace.
-    Emits progress (0-100) and finished/error signals.
+    Background thread that triggers the LightGlue weight download.
+    The lightglue library fetches from GitHub releases and caches in
+    ~/.cache/torch/hub/checkpoints/ — we just need to instantiate it.
     """
 
     progress = pyqtSignal(int)
@@ -52,62 +42,53 @@ class ModelDownloadWorker(QThread):
         self.models_dir = models_dir
 
     def run(self):
+        self.progress.emit(5)
+
+        # Check lightglue is installed
         try:
-            from huggingface_hub import hf_hub_download, snapshot_download
-        except ImportError:
+            import torch
+            import lightglue
+            from lightglue import LightGlue, SuperPoint
+        except ImportError as e:
             self.error.emit(
-                "huggingface_hub is not installed.\n"
-                "Run: pip install huggingface_hub"
+                f"LightGlue is not installed: {e}\n\n"
+                "Run: pip install git+https://github.com/cvg/LightGlue.git"
             )
             return
 
+        self.progress.emit(20)
+
+        # Instantiating SuperPoint + LightGlue triggers weight download
+        # if not already cached. This is the download step.
+        try:
+            log.info("Downloading/verifying SuperPoint weights…")
+            device = "cpu"
+            extractor = SuperPoint(max_num_keypoints=512).eval().to(device)
+            self.progress.emit(60)
+
+            log.info("Downloading/verifying LightGlue weights…")
+            matcher = LightGlue(features="superpoint").eval().to(device)
+            self.progress.emit(90)
+
+            # Quick sanity check — run on a tiny blank image
+            import torch
+            dummy = torch.zeros(1, 1, 64, 64).to(device)
+            with torch.no_grad():
+                feats = extractor.extract(dummy)
+            log.info("LightGlue sanity check passed.")
+
+        except Exception as e:
+            self.error.emit(f"Model download or initialisation failed:\n{e}")
+            return
+
+        # Write ready marker so future launches skip the download prompt
         self.models_dir.mkdir(parents=True, exist_ok=True)
-        n = len(LIGHTGLUE_FILES)
-
-        for i, filename in enumerate(LIGHTGLUE_FILES):
-            dest = self.models_dir / filename
-            if dest.exists():
-                log.info("Already present: %s", filename)
-                self.progress.emit(int((i + 1) / n * 90))
-                continue
-
-            log.info("Downloading: %s", filename)
-            try:
-                downloaded = hf_hub_download(
-                    repo_id=LIGHTGLUE_REPO,
-                    filename=filename,
-                    local_dir=str(self.models_dir),
-                )
-                log.info("Downloaded to: %s", downloaded)
-            except Exception as e:
-                self.error.emit(f"Download failed for {filename}: {e}")
-                return
-
-            # Verify checksum if we have one
-            expected = CHECKSUMS.get(filename)
-            if expected:
-                actual = _sha256(dest)
-                if actual != expected:
-                    dest.unlink(missing_ok=True)
-                    self.error.emit(
-                        f"Checksum mismatch for {filename}.\n"
-                        f"Expected: {expected}\nGot: {actual}\n"
-                        "The download may be corrupt. Please try again."
-                    )
-                    return
-
-            self.progress.emit(int((i + 1) / n * 90))
-
-        # Write ready marker
         (self.models_dir / READY_MARKER).write_text("ok")
+
         self.progress.emit(100)
-        log.info("LightGlue model ready in: %s", self.models_dir)
+        log.info("LightGlue ready.")
         self.finished.emit()
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def is_model_ready(models_dir: Path) -> bool:
+    return (models_dir / READY_MARKER).exists()

@@ -163,6 +163,8 @@ class TrayView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setBackgroundBrush(QColor(28, 28, 28))
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Enable trackpad pinch-to-zoom on Windows/Mac
+        self.viewport().grabGesture(Qt.GestureType.PinchGesture)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -399,6 +401,16 @@ class TrayView(QGraphicsView):
         delta = event.angleDelta().y()
         factor = ZOOM_FACTOR if delta > 0 else 1 / ZOOM_FACTOR
         self.scale(factor, factor)
+
+    def event(self, event):
+        """Catch pinch gestures from trackpad for zoom."""
+        from PyQt6.QtCore import QEvent
+        if event.type() == QEvent.Type.Gesture:
+            gesture = event.gesture(Qt.GestureType.PinchGesture)
+            if gesture:
+                self.scale(gesture.scaleFactor(), gesture.scaleFactor())
+                return True
+        return super().event(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:

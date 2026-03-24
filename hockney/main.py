@@ -33,6 +33,7 @@ from hockney.core.image_store import (
     choose_scratch_disk_default,
     check_scratch_disk_space,
 )
+from hockney.installer.model_fetch import is_model_ready
 from hockney.ui.main_window import MainWindow
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -135,18 +136,6 @@ class ScratchDiskDialog(QDialog):
             self._path_label.setText(f"Current selection: {self.chosen_path}")
 
 
-# ── Model check ────────────────────────────────────────────────────────────────
-
-def check_model_ready(models_dir: Path) -> bool:
-    """
-    Return True if LightGlue model files are present and usable.
-    (Actual model fetching lives in hockney/installer/model_fetch.py.)
-    """
-    # A minimal marker — the installer creates this file after a successful download
-    marker = models_dir / "lightglue_ready"
-    return marker.exists()
-
-
 def prompt_model_download(parent: QWidget | None = None) -> bool:
     """
     Inform the user that LightGlue needs to be downloaded and ask for consent.
@@ -193,7 +182,7 @@ def main():
     models_dir = Path(__file__).parent.parent / "models"
     models_dir.mkdir(exist_ok=True)
 
-    model_ready = check_model_ready(models_dir)
+    model_ready = is_model_ready(models_dir)
     if not model_ready:
         if prompt_model_download():
             # Kick off the download — done inside the main window so we can
