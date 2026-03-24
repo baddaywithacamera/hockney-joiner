@@ -190,12 +190,13 @@ def prompt_moondream_download(parent: QWidget | None = None) -> bool:
         parent,
         "Composition Chat Model",
         (
-            "<b>moondream2 vision model not found.</b><br><br>"
+            "<b>Composition chat model not found.</b><br><br>"
             "Hockney Joiner includes a chat panel that lets you ask questions about "
             "your composite — things like <i>\"which images look redundant?\"</i> "
             "or <i>\"what's the overall mood?\"</i><br><br>"
-            "moondream2 is open source, runs fully offline, and is about 1.7 GB. "
-            "It downloads once and is stored locally — no cloud connection needed.<br><br>"
+            "The vision model (BLIP-VQA by Salesforce) is open source, runs fully "
+            "offline, and is about 1.2 GB. It downloads once and is stored locally "
+            "— no cloud connection needed at runtime.<br><br>"
             "You can skip this now and download later via <b>Help → Download Composition AI</b>.<br><br>"
             "Download now?"
         ),

@@ -1,20 +1,20 @@
 """
-vision_chat.py — Moondream2 vision-language interface.
+vision_chat.py — BLIP-VQA vision-language interface.
 
-Moondream2 is a small (1.6B param, ~2GB) vision-language model that
-runs fully offline. It analyses images and answers questions about them
-in plain language.
+BLIP-VQA-Large is a ~1.2 GB vision-language model by Salesforce that
+runs fully offline. It answers questions about images in plain language.
 
 In the Hockney Joiner context it does two jobs:
   1. Answer open questions about the current composite or individual images.
   2. Return structured image index lists when asked about redundancy or quality,
      so the tray view can highlight flagged images for the photographer to review.
 
-The photographer always decides. Moondream advises.
+The photographer always decides. The AI advises.
 
-Backend: transformers + vikhyatk/moondream2 (standard HuggingFace safetensors).
-Revision 2024-08-26 — last stable release using only PIL (no pyvips/libvips).
-No proprietary file formats, no API keys, no cloud connection at runtime.
+Backend: transformers + Salesforce/blip-vqa-large (standard HuggingFace model).
+Uses BlipForQuestionAnswering — a first-class transformers class.
+No trust_remote_code, no custom code from HuggingFace, no API keys.
+Fully offline after the one-time ~1.2 GB download.
 """
 
 from __future__ import annotations
@@ -29,96 +29,63 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 log = logging.getLogger(__name__)
 
-MOONDREAM_MODEL_ID = "vikhyatk/moondream2"
-MOONDREAM_REVISION = "2024-08-26"   # last stable release; PIL only, no pyvips
-READY_MARKER = "moondream_ready"
+VQA_MODEL_ID = "Salesforce/blip-vqa-large"
+READY_MARKER = "vision_ready"
 
 
 def is_moondream_ready(models_dir: Path) -> bool:
+    """Check if the vision model has been downloaded."""
     return (models_dir / READY_MARKER).exists()
 
 
 def _ensure_deps() -> bool:
-    """Install transformers + einops if missing. Returns True on success."""
-    missing = []
-    for pkg, import_name in [
-        ("transformers", "transformers"),
-        ("einops", "einops"),
-    ]:
-        try:
-            __import__(import_name)
-        except ImportError:
-            missing.append(pkg)
-
-    if not missing:
+    """Install transformers if missing. Returns True on success."""
+    try:
+        import transformers  # noqa: F401
         return True
+    except ImportError:
+        pass
 
-    log.info("Installing missing packages: %s", missing)
+    log.info("Installing transformers…")
     try:
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install"] + missing,
+            [sys.executable, "-m", "pip", "install", "transformers"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
         return True
     except Exception as e:
-        log.error("Failed to install packages %s: %s", missing, e)
+        log.error("Failed to install transformers: %s", e)
         return False
 
 
-def _patch_config(config):
-    """
-    Newer transformers removed pad_token_id from PhiConfig, but moondream2's
-    custom code still references it. Patch it in if missing so the model
-    loads without crashing.
-    """
-    if not hasattr(config, "pad_token_id") or config.pad_token_id is None:
-        config.pad_token_id = getattr(config, "eos_token_id", 0)
-    return config
-
-
 def _load_model(models_dir: Path):
-    """Load moondream2 from the local cache, returns (model, tokenizer)."""
+    """Load BLIP-VQA from the local cache, returns (model, processor)."""
     import torch
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+    from transformers import BlipForQuestionAnswering, BlipProcessor
 
     cache_dir = str(models_dir)
-
-    # Load and patch config first to avoid PhiConfig attribute errors
-    config = AutoConfig.from_pretrained(
-        MOONDREAM_MODEL_ID,
-        revision=MOONDREAM_REVISION,
-        trust_remote_code=True,
+    processor = BlipProcessor.from_pretrained(
+        VQA_MODEL_ID,
         cache_dir=cache_dir,
         local_files_only=True,
     )
-    _patch_config(config)
-
-    model = AutoModelForCausalLM.from_pretrained(
-        MOONDREAM_MODEL_ID,
-        revision=MOONDREAM_REVISION,
-        trust_remote_code=True,
+    model = BlipForQuestionAnswering.from_pretrained(
+        VQA_MODEL_ID,
         cache_dir=cache_dir,
         local_files_only=True,
-        config=config,
         torch_dtype=torch.float32,
     )
-    tokenizer = AutoTokenizer.from_pretrained(
-        MOONDREAM_MODEL_ID,
-        revision=MOONDREAM_REVISION,
-        cache_dir=cache_dir,
-        local_files_only=True,
-    )
     model.eval()
-    return model, tokenizer
+    return model, processor
 
 
 # ── Async query worker ─────────────────────────────────────────────────────────
 
 class VisionQueryWorker(QThread):
     """
-    Background thread: sends an image + question to moondream2, returns answer.
-    The answer may contain image index references like "images 3, 7, and 12"
+    Background thread: sends an image + question to BLIP-VQA, returns answer.
+    The answer may contain image index references like "3, 7, 12"
     which the caller can parse and use to highlight tiles in the tray view.
     """
 
@@ -139,20 +106,23 @@ class VisionQueryWorker(QThread):
     def run(self):
         if not _ensure_deps():
             self.error.emit(
-                "Could not install required packages.\n"
-                "Please run:  pip install transformers einops"
+                "Could not install transformers.\n"
+                "Please run:  pip install transformers"
             )
             return
 
         try:
-            model, tokenizer = _load_model(self._models_dir)
-            enc_image = model.encode_image(self._image)
-            answer = model.answer_question(enc_image, self._question, tokenizer)
+            import torch
+            model, processor = _load_model(self._models_dir)
+            inputs = processor(self._image, self._question, return_tensors="pt")
+            with torch.no_grad():
+                output = model.generate(**inputs, max_new_tokens=100)
+            answer = processor.decode(output[0], skip_special_tokens=True).strip()
         except Exception as e:
-            self.error.emit(f"Moondream query failed: {e}")
+            self.error.emit(f"Vision query failed: {e}")
             return
 
-        log.info("Moondream answer: %s", answer[:120])
+        log.info("BLIP answer: %s", answer[:120])
         self.finished.emit(answer)
 
         found = _extract_indices(answer)
@@ -162,7 +132,7 @@ class VisionQueryWorker(QThread):
 
 def _extract_indices(text: str) -> list[int]:
     """
-    Parse image index numbers from moondream's response.
+    Parse image index numbers from the model's response.
     Handles: "images 3, 7 and 12", "image 4", "#5", "number 2", etc.
     Returns sorted list of 1-based integers.
     """
@@ -171,12 +141,13 @@ def _extract_indices(text: str) -> list[int]:
     return indices
 
 
-# ── Moondream download worker ──────────────────────────────────────────────────
+# ── Download worker ───────────────────────────────────────────────────────────
 
 class MoondreamDownloadWorker(QThread):
     """
-    Downloads moondream2 weights from HuggingFace using the transformers cache.
-    Uses standard safetensors format — no custom file formats, no pyvips.
+    Downloads BLIP-VQA-Large weights from HuggingFace.
+    Uses standard BlipForQuestionAnswering — no custom code, no trust_remote_code.
+    Class name kept as MoondreamDownloadWorker for backward compat with UI wiring.
     """
 
     progress = pyqtSignal(int)
@@ -192,53 +163,38 @@ class MoondreamDownloadWorker(QThread):
 
         if not _ensure_deps():
             self.error.emit(
-                "Could not install required packages.\n"
-                "Please run:  pip install transformers einops"
+                "Could not install transformers.\n"
+                "Please run:  pip install transformers"
             )
             return
 
         self.progress.emit(10)
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check if already downloaded
         if is_moondream_ready(self.models_dir):
-            log.info("Moondream already downloaded.")
+            log.info("Vision model already downloaded.")
             self.progress.emit(100)
             self.finished.emit()
             return
 
         try:
             import torch
-            from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+            from transformers import BlipForQuestionAnswering, BlipProcessor
 
-            log.info("Downloading moondream2 weights (~2 GB)…")
+            log.info("Downloading BLIP-VQA-Large (~1.2 GB)…")
             self.progress.emit(15)
 
-            # Download tokenizer first (small)
-            AutoTokenizer.from_pretrained(
-                MOONDREAM_MODEL_ID,
-                revision=MOONDREAM_REVISION,
-                trust_remote_code=True,
+            # Download processor (tokenizer + image processor, small)
+            BlipProcessor.from_pretrained(
+                VQA_MODEL_ID,
                 cache_dir=str(self.models_dir),
             )
             self.progress.emit(30)
 
-            # Download config and patch PhiConfig compatibility issue
-            config = AutoConfig.from_pretrained(
-                MOONDREAM_MODEL_ID,
-                revision=MOONDREAM_REVISION,
-                trust_remote_code=True,
+            # Download model weights
+            BlipForQuestionAnswering.from_pretrained(
+                VQA_MODEL_ID,
                 cache_dir=str(self.models_dir),
-            )
-            _patch_config(config)
-
-            # Download model weights (the big one)
-            AutoModelForCausalLM.from_pretrained(
-                MOONDREAM_MODEL_ID,
-                revision=MOONDREAM_REVISION,
-                trust_remote_code=True,
-                cache_dir=str(self.models_dir),
-                config=config,
                 torch_dtype=torch.float32,
             )
             self.progress.emit(95)
@@ -247,7 +203,6 @@ class MoondreamDownloadWorker(QThread):
             self.error.emit(f"Download failed: {e}")
             return
 
-        # Write ready marker
         (self.models_dir / READY_MARKER).write_text("ok")
         self.progress.emit(100)
         self.finished.emit()
