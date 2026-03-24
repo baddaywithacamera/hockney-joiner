@@ -25,6 +25,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
+    QDockWidget,
     QFileDialog,
     QHBoxLayout,
     QMainWindow,
@@ -85,26 +86,54 @@ class MainWindow(QMainWindow):
     # ── UI construction ────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_layout.addWidget(splitter)
-
+        # Tray canvas is the central (non-dockable) widget
         self.tray_view = TrayView(self.store, parent=self)
-        splitter.addWidget(self.tray_view)
+        self.setCentralWidget(self.tray_view)
 
+        # ── Tools & settings dock (right) ─────────────────────────────────────
         self.sidebar = Sidebar(self.store, models_dir=self.models_dir, parent=self)
         self.sidebar.setMinimumWidth(240)
-        self.sidebar.setMaximumWidth(340)
-        splitter.addWidget(self.sidebar)
 
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
+        self._sidebar_dock = QDockWidget("Tools", self)
+        self._sidebar_dock.setObjectName("sidebar_dock")
+        self._sidebar_dock.setWidget(self.sidebar)
+        self._sidebar_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._sidebar_dock)
+
+        # ── Composition chat dock (right, below Tools by default) ─────────────
+        if self.sidebar.chat_panel:
+            # Pull the chat panel out of the sidebar and give it its own dock
+            self.sidebar.layout().removeWidget(self.sidebar.chat_panel)
+            self._chat_dock = QDockWidget("Composition Chat", self)
+            self._chat_dock.setObjectName("chat_dock")
+            self._chat_dock.setWidget(self.sidebar.chat_panel)
+            self._chat_dock.setAllowedAreas(
+                Qt.DockWidgetArea.LeftDockWidgetArea
+                | Qt.DockWidgetArea.RightDockWidgetArea
+                | Qt.DockWidgetArea.BottomDockWidgetArea
+            )
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._chat_dock)
+            # Stack the chat dock below the sidebar dock by default
+            self.splitDockWidget(
+                self._sidebar_dock,
+                self._chat_dock,
+                Qt.Orientation.Vertical,
+            )
+        else:
+            self._chat_dock = None
+
+        # ── Restore saved dock/window layout ──────────────────────────────────
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("HockneyJoiner", "Hockney Joiner")
+        geometry = settings.value("window_geometry")
+        state = settings.value("window_state")
+        if geometry:
+            self.restoreGeometry(geometry)
+        if state:
+            self.restoreState(state)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -188,6 +217,37 @@ class MainWindow(QMainWindow):
         fit_action.setShortcut(QKeySequence("F"))
         fit_action.triggered.connect(self.tray_view.fit_all)
         view_menu.addAction(fit_action)
+
+        view_menu.addSeparator()
+
+        # Panels — these are created in _build_ui so we add them after the
+        # fact using a deferred lambda; the dock's own toggle action is also
+        # available via its title-bar context menu when floating.
+        show_tools_action = QAction("Show &Tools Panel", self)
+        show_tools_action.setCheckable(True)
+        show_tools_action.setChecked(True)
+        show_tools_action.triggered.connect(
+            lambda checked: self._sidebar_dock.setVisible(checked)
+        )
+        self._sidebar_dock.visibilityChanged.connect(show_tools_action.setChecked)
+        view_menu.addAction(show_tools_action)
+
+        if self._chat_dock:
+            show_chat_action = QAction("Show &Composition Chat", self)
+            show_chat_action.setCheckable(True)
+            show_chat_action.setChecked(True)
+            show_chat_action.triggered.connect(
+                lambda checked: self._chat_dock.setVisible(checked)
+            )
+            self._chat_dock.visibilityChanged.connect(show_chat_action.setChecked)
+            view_menu.addAction(show_chat_action)
+
+        view_menu.addSeparator()
+
+        reset_layout_action = QAction("&Reset Panel Layout", self)
+        reset_layout_action.setToolTip("Return all panels to their default positions")
+        reset_layout_action.triggered.connect(self._reset_panel_layout)
+        view_menu.addAction(reset_layout_action)
 
     def _build_toolbar(self):
         toolbar = QToolBar("Main Toolbar")
@@ -518,11 +578,33 @@ class MainWindow(QMainWindow):
         )
         log.info("Scratch disk changed to: %s", new_path)
 
+    def _reset_panel_layout(self):
+        """View → Reset Panel Layout — bring all docks back to defaults."""
+        # Re-dock everything in case panels were floated to other monitors
+        self._sidebar_dock.setFloating(False)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._sidebar_dock)
+        self._sidebar_dock.setVisible(True)
+        if self._chat_dock:
+            self._chat_dock.setFloating(False)
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._chat_dock)
+            self.splitDockWidget(
+                self._sidebar_dock,
+                self._chat_dock,
+                Qt.Orientation.Vertical,
+            )
+            self._chat_dock.setVisible(True)
+
     def _update_status(self, msg: str):
         self.status_bar.showMessage(msg)
         log.info(msg)
 
     def closeEvent(self, event):
+        # Persist window geometry and dock layout so panels reopen where the
+        # user left them — including on secondary monitors
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("HockneyJoiner", "Hockney Joiner")
+        settings.setValue("window_geometry", self.saveGeometry())
+        settings.setValue("window_state", self.saveState())
         event.accept()
 
 
