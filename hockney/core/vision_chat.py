@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -63,11 +65,20 @@ class VisionQueryWorker(QThread):
         try:
             import moondream as md
         except ImportError:
-            self.error.emit(
-                "Moondream is not installed.\n"
-                "Run: pip install moondream"
-            )
-            return
+            log.info("moondream package missing — installing automatically…")
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "moondream"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                import moondream as md  # noqa: F811
+            except Exception as install_err:
+                self.error.emit(
+                    f"Could not install moondream package automatically.\n"
+                    f"Please run:  pip install moondream\n\nDetail: {install_err}"
+                )
+                return
 
         try:
             model_path = str(self._models_dir / "moondream-2b-int8.mf")
@@ -117,13 +128,23 @@ class MoondreamDownloadWorker(QThread):
     def run(self):
         self.progress.emit(5)
         try:
-            import moondream as md
+            import moondream as md  # noqa: F401
         except ImportError:
-            self.error.emit(
-                "Moondream package not installed.\n"
-                "Run: pip install moondream"
-            )
-            return
+            log.info("moondream package missing — installing automatically…")
+            self.progress.emit(8)
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "moondream"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+            except Exception as install_err:
+                self.error.emit(
+                    f"Could not install moondream package automatically.\n"
+                    f"Please run:  pip install moondream\n\nDetail: {install_err}"
+                )
+                return
+            log.info("moondream package installed.")
 
         self.models_dir.mkdir(parents=True, exist_ok=True)
         model_path = self.models_dir / "moondream-2b-int8.mf"
