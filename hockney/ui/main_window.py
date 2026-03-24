@@ -203,7 +203,7 @@ class MainWindow(QMainWindow):
         dl_lg.triggered.connect(self._start_model_download)
         help_menu.addAction(dl_lg)
 
-        dl_md = QAction("Download Moondream (composition chat)…", self)
+        dl_md = QAction("Download Composition AI…", self)
         dl_md.triggered.connect(self._start_moondream_download)
         help_menu.addAction(dl_md)
 
@@ -513,9 +513,9 @@ class MainWindow(QMainWindow):
     def _start_moondream_download(self):
         result = QMessageBox.question(
             self,
-            "Download Moondream",
-            "<b>Download Moondream2 vision model?</b><br><br>"
-            "~1.7 GB download. Runs fully offline after download.<br>"
+            "Download Composition AI",
+            "<b>Download BLIP-VQA vision model?</b><br><br>"
+            "~1.2 GB download. Runs fully offline after download.<br>"
             "Enables the composition chat panel in the sidebar.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
@@ -523,7 +523,7 @@ class MainWindow(QMainWindow):
             return
 
         from hockney.core.vision_chat import MoondreamDownloadWorker
-        progress = QProgressDialog("Downloading Moondream (~1.7 GB)…", None, 0, 100, self)
+        progress = QProgressDialog("Downloading Composition AI (~1.2 GB)…", None, 0, 100, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.show()
 
@@ -536,11 +536,11 @@ class MainWindow(QMainWindow):
 
     def _on_moondream_ready(self, progress: QProgressDialog):
         progress.close()
-        self._update_status("Moondream ready — composition chat available.")
+        self._update_status("Composition AI ready — chat panel available.")
 
     def _on_moondream_error(self, msg: str, progress: QProgressDialog):
         progress.close()
-        QMessageBox.warning(self, "Moondream Download Failed", msg)
+        QMessageBox.warning(self, "Download Failed", msg)
 
     # ── Misc ───────────────────────────────────────────────────────────────────
 
