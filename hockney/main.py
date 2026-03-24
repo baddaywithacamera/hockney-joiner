@@ -57,20 +57,63 @@ APP_VERSION = "0.1.0"
 def get_scratch_disk(app: QApplication) -> Path:
     """
     Return the user's chosen scratch disk path.
-    If not yet set, show the selection dialog and remember the choice.
+
+    Logic:
+      1. If a saved path exists and its drive is mounted → use it.
+      2. If a saved path exists but the drive is missing → warn and offer to
+         wait/replug or pick a different location.
+      3. First run (no saved path) → show the selection dialog.
     """
     settings = QSettings(APP_ORG, APP_NAME)
     saved = settings.value("scratch_disk", "")
 
-    if saved and Path(saved).exists():
-        return Path(saved)
+    if saved:
+        saved_path = Path(saved)
+        if saved_path.exists():
+            log.info("Scratch disk found: %s", saved_path)
+            return saved_path
 
-    # First run (or saved path gone) — ask the user
+        # Drive is known but not currently present
+        drive_label = str(saved_path.anchor) if saved_path.anchor else str(saved_path)
+        result = QMessageBox.warning(
+            None,
+            "Scratch Drive Not Found",
+            (
+                f"<b>Your scratch drive is not connected.</b><br><br>"
+                f"Last used location:<br><code>{saved_path}</code><br><br>"
+                f"Please plug in the drive and click <b>Retry</b>, "
+                f"or choose a different scratch location."
+            ),
+            QMessageBox.StandardButton.Retry
+            | QMessageBox.StandardButton.Open
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Retry,
+        )
+
+        if result == QMessageBox.StandardButton.Retry:
+            # Re-check — drive may now be plugged in
+            if saved_path.exists():
+                log.info("Scratch disk found after retry: %s", saved_path)
+                return saved_path
+            # Still missing — fall through to picker below
+            QMessageBox.information(
+                None,
+                "Drive Still Not Found",
+                "Drive still not detected. Please choose a different scratch location.",
+            )
+        elif result == QMessageBox.StandardButton.Cancel:
+            # Fall back to system temp silently
+            fallback = choose_scratch_disk_default()
+            log.info("User cancelled scratch selection — using system temp: %s", fallback)
+            fallback.mkdir(parents=True, exist_ok=True)
+            return fallback
+        # StandardButton.Open or retry failed → drop through to picker
+
+    # First run or user wants to pick a new location
     dialog = ScratchDiskDialog()
     if dialog.exec() == QDialog.DialogCode.Accepted:
         chosen = dialog.chosen_path
     else:
-        # User cancelled — fall back to system temp
         chosen = choose_scratch_disk_default()
         log.info("No scratch disk chosen — using system temp: %s", chosen)
 

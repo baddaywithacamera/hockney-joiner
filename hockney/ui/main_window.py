@@ -143,6 +143,13 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
+        scratch_action = QAction("Change &Scratch Disk…", self)
+        scratch_action.setToolTip("Choose a different scratch disk folder (e.g. a USB SSD)")
+        scratch_action.triggered.connect(self._change_scratch_disk)
+        file_menu.addAction(scratch_action)
+
+        file_menu.addSeparator()
+
         quit_action = QAction("&Quit", self)
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
@@ -479,6 +486,37 @@ class MainWindow(QMainWindow):
 
     def _on_image_activated(self, image_id: str):
         self.sidebar.set_active_image(image_id)
+
+    def _change_scratch_disk(self):
+        """File → Change Scratch Disk — pick a new scratch location mid-session."""
+        from hockney.main import ScratchDiskDialog
+        from PyQt6.QtCore import QSettings
+        from hockney.main import APP_ORG, APP_NAME
+
+        current = self.session.scratch_root if hasattr(self.session, "scratch_root") else ""
+        dialog = ScratchDiskDialog(self)
+        if current:
+            dialog.chosen_path = current
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        new_path = dialog.chosen_path
+        new_path.mkdir(parents=True, exist_ok=True)
+
+        # Persist the new choice
+        settings = QSettings(APP_ORG, APP_NAME)
+        settings.setValue("scratch_disk", str(new_path))
+
+        QMessageBox.information(
+            self,
+            "Scratch Disk Updated",
+            (
+                f"Scratch disk changed to:<br><code>{new_path}</code><br><br>"
+                "The new location will be used for all future cache writes. "
+                "Restart the app to migrate any existing cache files."
+            ),
+        )
+        log.info("Scratch disk changed to: %s", new_path)
 
     def _update_status(self, msg: str):
         self.status_bar.showMessage(msg)
