@@ -523,8 +523,11 @@ class MainWindow(QMainWindow):
             return
 
         from hockney.core.vision_chat import MoondreamDownloadWorker
-        progress = QProgressDialog("Downloading Composition AI (~1.2 GB)…", None, 0, 100, self)
+        progress = QProgressDialog("Downloading Composition AI (~1.2 GB)…\nThis may take a few minutes.", None, 0, 100, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
         progress.show()
 
         worker = MoondreamDownloadWorker(self.models_dir)

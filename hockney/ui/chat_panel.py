@@ -1,13 +1,14 @@
 """
-chat_panel.py — Moondream composition chat panel.
+chat_panel.py — Composition chat panel.
 
 A simple Q&A panel in the sidebar. The user types a question about their
-composition; moondream looks at a contact sheet of all thumbnails and responds.
+composition; the vision model looks at a contact sheet of all thumbnails
+and responds.
 
 If the response mentions image numbers, those images are highlighted in the
 tray view. The photographer reviews and decides what to do.
 
-Moondream advises. The photographer decides.
+The AI advises. The photographer decides.
 """
 
 from __future__ import annotations
@@ -39,9 +40,9 @@ PLACEHOLDER_QUESTIONS = [
 
 class ChatPanel(QWidget):
     """
-    Moondream Q&A panel. Parent must connect tray_view so we can:
+    Composition Q&A panel. Parent must connect tray_view so we can:
       - call render_contact_sheet() to get the image to analyse
-      - call highlight_by_index() with moondream's flagged indices
+      - call highlight_by_index() with the model's flagged indices
     """
 
     indices_ready = pyqtSignal(list)   # list[int] — connected to tray_view.highlight_by_index
@@ -66,7 +67,7 @@ class ChatPanel(QWidget):
         header.setStyleSheet("font-weight: bold; font-size: 12px;")
         layout.addWidget(header)
 
-        self._status = QLabel("Moondream ready.")
+        self._status = QLabel("Ready.")
         self._status.setWordWrap(True)
         self._status.setStyleSheet("color: #888; font-size: 10px;")
         layout.addWidget(self._status)
@@ -109,7 +110,7 @@ class ChatPanel(QWidget):
         from hockney.core.vision_chat import is_moondream_ready, VisionQueryWorker
 
         if not is_moondream_ready(self.models_dir):
-            self._append("⚠ Moondream not downloaded. Use Help → Download Moondream.")
+            self._append("⚠ Composition AI not downloaded. Use Help → Download Composition AI.")
             return
 
         sheet = self._tray_view.render_contact_sheet()
@@ -129,7 +130,7 @@ class ChatPanel(QWidget):
         self._worker.start()
 
     def _on_answer(self, text: str):
-        self._append(f"Moondream: {text}")
+        self._append(f"AI: {text}")
         self._send_btn.setEnabled(True)
         self._set_status("Ready.")
 
