@@ -63,10 +63,6 @@ class ChatPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        header = QLabel("Composition Chat")
-        header.setStyleSheet("font-weight: bold; font-size: 12px;")
-        layout.addWidget(header)
-
         self._status = QLabel("Ready.")
         self._status.setWordWrap(True)
         self._status.setStyleSheet("color: #888; font-size: 10px;")
