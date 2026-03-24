@@ -21,6 +21,8 @@ from PyQt6.QtCore import Qt
 from pathlib import Path
 
 from hockney.core.image_store import ImageStore
+from hockney.core.models import ProjectConfig
+from hockney.ui.reference_panel import ReferencePanel
 
 FILTER_OPTIONS = [
     "None", "Lo-Fi", "Clarendon", "Juno", "Lark", "Ludwig",
@@ -31,6 +33,7 @@ FILTER_OPTIONS = [
 
 class Sidebar(QWidget):
     process_requested = pyqtSignal(dict)
+    reference_changed = pyqtSignal()
 
     def __init__(self, store: ImageStore, models_dir: Path | None = None,
                  parent: QWidget | None = None):
@@ -43,6 +46,9 @@ class Sidebar(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(12)
+
+        # ── Reference images (hidden until New Project is created) ─────────
+        self._ref_panel: ReferencePanel | None = None
 
         # ── Image list ────────────────────────────────────────────────────────
         list_group = QGroupBox("Images")
@@ -145,6 +151,25 @@ class Sidebar(QWidget):
                 f"{record.width} × {record.height} px\n"
                 f"{record.file_size / 1024 / 1024:.1f} MB"
             )
+
+    def set_project_config(self, config: ProjectConfig | None):
+        """Show or update the reference panel for the current project config."""
+        layout = self.layout()
+        if config is None:
+            # Remove existing reference panel
+            if self._ref_panel:
+                layout.removeWidget(self._ref_panel)
+                self._ref_panel.deleteLater()
+                self._ref_panel = None
+            return
+
+        if self._ref_panel:
+            self._ref_panel.set_config(config)
+        else:
+            self._ref_panel = ReferencePanel(config, parent=self)
+            self._ref_panel.reference_changed.connect(self.reference_changed)
+            # Insert at top of sidebar (index 0)
+            layout.insertWidget(0, self._ref_panel)
 
     def refresh(self):
         self.image_list.clear()

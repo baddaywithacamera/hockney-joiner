@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 )
 
 from hockney.core.image_store import ImageStore, ScratchSession, check_scratch_disk_space
+from hockney.core.models import ProjectConfig
 from hockney.ui.tray_view import TrayView
 from hockney.ui.sidebar import Sidebar
 
@@ -64,6 +65,7 @@ class MainWindow(QMainWindow):
 
         self.store = ImageStore(session)
         self._status_history: deque[str] = deque(maxlen=4)
+        self._project_config: ProjectConfig | None = None
 
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1400, 900)
@@ -153,6 +155,13 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu("&File")
+
+        new_project_action = QAction("&New Project…", self)
+        new_project_action.setShortcut(QKeySequence("Ctrl+N"))
+        new_project_action.triggered.connect(self._new_project)
+        file_menu.addAction(new_project_action)
+
+        file_menu.addSeparator()
 
         load_action = QAction("&Load Images…", self)
         load_action.setShortcut(QKeySequence.StandardKey.Open)
@@ -305,6 +314,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         self.sidebar.process_requested.connect(self._on_process_requested)
+        self.sidebar.reference_changed.connect(self._on_reference_changed)
         self.tray_view.image_activated.connect(self._on_image_activated)
         self.tray_view.deal_mode_changed.connect(self._on_deal_mode_changed)
         # Connect moondream chat panel to the tray view
@@ -332,21 +342,38 @@ class MainWindow(QMainWindow):
 
     # ── Load ───────────────────────────────────────────────────────────────────
 
+    def _last_image_dir(self) -> str:
+        """Return the last directory used for loading images, or empty string."""
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("HockneyJoiner", "Hockney Joiner")
+        return settings.value("last_image_dir", "", type=str)
+
+    def _save_image_dir(self, path: Path):
+        """Persist the directory so next open starts there."""
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("HockneyJoiner", "Hockney Joiner")
+        folder = str(path if path.is_dir() else path.parent)
+        settings.setValue("last_image_dir", folder)
+
     def load_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Image Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Image Folder", self._last_image_dir()
+        )
         if not folder:
             return
+        self._save_image_dir(Path(folder))
         self._load_path(Path(folder), is_folder=True)
 
     def load_images(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Select Images",
-            "",
+            self._last_image_dir(),
             "Images (*.jpg *.jpeg *.png *.tif *.tiff *.cr2 *.cr3 *.nef *.arw *.dng)",
         )
         if not paths:
             return
+        self._save_image_dir(Path(paths[0]))
         self._load_path([Path(p) for p in paths], is_folder=False)
 
     def _load_path(self, path, is_folder: bool):
@@ -372,6 +399,7 @@ class MainWindow(QMainWindow):
     def _on_load_finished(self, count: int, progress: QProgressDialog):
         progress.close()
         self.tray_view.refresh()
+        self.tray_view.arrange_grid()   # spread images out instead of stacking at origin
         self.sidebar.refresh()
         self.tray_view.fit_all()
         self.process_btn.setEnabled(count > 0)
@@ -391,23 +419,40 @@ class MainWindow(QMainWindow):
         self._update_status("Computing placements…")
         self.process_btn.setEnabled(False)
 
-        worker = PlacementWorker(self.store, self.model_ready, self.models_dir)
-        progress = QProgressDialog("Computing placements…", "Cancel", 0, 100, self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setWindowTitle("Auto-Place")
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.show()
+        worker = PlacementWorker(self.store, self.model_ready, self.models_dir,
+                                  config=self._project_config)
 
-        progress.canceled.connect(worker.cancel)
-        worker.progress.connect(progress.setValue)
-        worker.finished.connect(lambda result: self._on_placement_finished(result, progress))
-        worker.error.connect(lambda msg: self._on_placement_error(msg, progress))
+        # Build a plain QDialog instead of QProgressDialog to avoid
+        # QProgressDialog's auto-cancel / auto-close quirks.
+        from PyQt6.QtWidgets import QProgressBar, QPushButton, QVBoxLayout, QDialog, QLabel
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Auto-Place")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumWidth(350)
+        dlg_layout = QVBoxLayout(dlg)
+        dlg_label = QLabel("Computing placements…")
+        dlg_layout.addWidget(dlg_label)
+        dlg_bar = QProgressBar()
+        dlg_bar.setRange(0, 100)
+        dlg_layout.addWidget(dlg_bar)
+        dlg_cancel = QPushButton("Cancel")
+        dlg_layout.addWidget(dlg_cancel)
+        dlg.show()
+
+        def _on_cancel():
+            worker.cancel()
+            dlg_label.setText("Cancelling…")
+            dlg_cancel.setEnabled(False)
+
+        dlg_cancel.clicked.connect(_on_cancel)
+        worker.progress.connect(dlg_bar.setValue)
+        worker.finished.connect(lambda result: self._on_placement_finished(result, dlg))
+        worker.error.connect(lambda msg: self._on_placement_error(msg, dlg))
         worker.start()
         self._placement_worker = worker
 
-    def _on_placement_finished(self, result, progress: QProgressDialog):
-        progress.close()
+    def _on_placement_finished(self, result, dlg):
+        dlg.close()
         if self._placement_worker and self._placement_worker._cancelled:
             self.process_btn.setEnabled(True)
             self._update_status("Placement cancelled.")
@@ -417,8 +462,8 @@ class MainWindow(QMainWindow):
         self.process_btn.setEnabled(True)
         self._update_status(result.message)
 
-    def _on_placement_error(self, msg: str, progress: QProgressDialog):
-        progress.close()
+    def _on_placement_error(self, msg: str, dlg):
+        dlg.close()
         self.process_btn.setEnabled(True)
         QMessageBox.critical(self, "Placement Error", msg)
 
@@ -436,6 +481,12 @@ class MainWindow(QMainWindow):
 
         from hockney.core.project import load_project
         result = load_project(Path(path), self.store)
+
+        # Restore project config if present
+        if result.config:
+            self._project_config = result.config
+            self.sidebar.set_project_config(result.config)
+            self._update_toolbar_label()
 
         self.tray_view.refresh()
         self.tray_view.set_placements(result.placements)
@@ -467,6 +518,7 @@ class MainWindow(QMainWindow):
             placements=self.tray_view.all_placements(),
             removed_ids=self.tray_view._removed_ids,
             processing=self.sidebar.get_processing_settings(),
+            config=self._project_config,
         )
         self._update_status(f"Saved: {Path(path).name}")
 
@@ -581,6 +633,31 @@ class MainWindow(QMainWindow):
         progress.close()
         QMessageBox.warning(self, "Download Failed", msg)
 
+    # ── Project config ──────────────────────────────────────────────────────
+
+    def _new_project(self):
+        from hockney.ui.new_project_dialog import NewProjectDialog
+        dlg = NewProjectDialog(self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        config = dlg.get_config()
+        self._project_config = config
+        self.sidebar.set_project_config(config)
+        self._update_toolbar_label()
+        self.setWindowTitle(f"{WINDOW_TITLE} — {config.project_name}")
+        self._update_status(f"Project: {config.project_name}  ({config.project_type})")
+
+    def _on_reference_changed(self):
+        """Sidebar reference panel changed — update toolbar label."""
+        self._update_toolbar_label()
+
+    def _update_toolbar_label(self):
+        """Update the Auto-Place button text based on whether references are loaded."""
+        if self._project_config and self._project_config.has_references():
+            self.process_btn.setText("Auto-Place  [Reference]")
+        else:
+            self.process_btn.setText("Auto-Place  [LightGlue]")
+
     # ── Misc ───────────────────────────────────────────────────────────────────
 
     def _on_image_activated(self, image_id: str):
@@ -634,6 +711,10 @@ class MainWindow(QMainWindow):
         self.tray_view._active_id = None
         self.tray_view._commands = type(self.tray_view._commands)()  # fresh CommandStack
         self.store.clear()
+        self._project_config = None
+        self.sidebar.set_project_config(None)
+        self._update_toolbar_label()
+        self.setWindowTitle(WINDOW_TITLE)
         self.sidebar.refresh()
         self.process_btn.setEnabled(False)
         self._update_status("Composition cleared.")

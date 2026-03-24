@@ -51,11 +51,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hockney.core.models import ImagePlacement
+from hockney.core.models import ImagePlacement, ProjectConfig
 
 log = logging.getLogger(__name__)
 
-PROJECT_VERSION = 1
+PROJECT_VERSION = 2
 
 
 # ── Save ───────────────────────────────────────────────────────────────────────
@@ -66,6 +66,7 @@ def save_project(
     placements: list[ImagePlacement],
     removed_ids: set[str],
     processing: dict[str, Any],
+    config: ProjectConfig | None = None,
 ):
     """
     Write a complete project file to path.
@@ -79,6 +80,8 @@ def save_project(
         "removed_ids": list(removed_ids),
         "processing": processing,
     }
+    if config:
+        doc["config"] = config.as_dict()
 
     path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
     log.info("Project saved: %s (%d images, %d placements)",
@@ -94,6 +97,7 @@ class ProjectLoadResult:
         self.processing: dict[str, Any] = {}
         self.missing_files: list[str] = []   # source files that couldn't be found
         self.version: int = 0
+        self.config: ProjectConfig | None = None
 
 
 def load_project(path: Path, store) -> ProjectLoadResult:
@@ -151,6 +155,10 @@ def load_project(path: Path, store) -> ProjectLoadResult:
         "surface_effect": "None",
         "surface_intensity": 30,
     })
+
+    # ── Project config (v2+) ─────────────────────────────────────────────────
+    if "config" in raw:
+        result.config = ProjectConfig.from_dict(raw["config"])
 
     log.info(
         "Project loaded: %d placements, %d missing files",
