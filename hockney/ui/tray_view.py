@@ -1,114 +1,78 @@
 """
 tray_view.py — The central Tray View canvas.
 
-A QGraphicsView/QGraphicsScene-based canvas showing all loaded images
+A QGraphicsView/QGraphicsScene canvas showing all loaded images
 in their auto-detected or manually-placed positions.
 
-Key interactions (per spec):
+Keyboard controls (per spec):
+  Arrow keys ←/→        Rotate active image ±0.5° (Shift = ±0.1° fine)
+  Arrow keys ↑/↓        Nudge active image ±1px
+  Z / X                 Send active image backward/forward in layer stack
+  Delete                Remove image from composition (undoable)
+  Ctrl+Z / Ctrl+Y       Undo/redo all refinement operations
+  R                     Reset active image to auto-placed position
+  G                     Toggle grid overlay
+  F                     Fit all images in view
+
+Mouse:
   Scroll wheel          Zoom in/out
   Middle-mouse drag     Pan canvas
-  Hover over image      Highlight edges, dim others
-  Click to activate     Selected image becomes focus for transforms
-  Arrow keys ←/→        Rotate active image ±0.5° (Shift for ±0.1°)
-  Arrow keys ↑/↓        Nudge active image ±1px
-  Z / X keys            Send active image backward/forward in layer stack
-  Delete key            Remove image (undoable)
-  Ctrl+Z / Ctrl+Y       Undo/redo
-  R key                 Reset active image to auto-placed position
-  G key                 Toggle grid overlay
+  Click image           Activate (keyboard controls apply to it)
+  Click empty canvas    Deactivate
 
-Misalignment is not a bug. This view embraces it.
+Philosophy: misalignment is valid creative output, not an error to fix.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from collections import deque
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
+from PyQt6.QtCore import Qt, QRectF, pyqtSignal
 from PyQt6.QtGui import (
+    QColor,
     QImage,
     QKeyEvent,
     QPainter,
     QPen,
     QPixmap,
-    QTransform,
     QWheelEvent,
-    QColor,
 )
 from PyQt6.QtWidgets import (
     QGraphicsItem,
     QGraphicsPixmapItem,
-    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
     QWidget,
 )
 
 from hockney.core.image_store import ImageStore
+from hockney.core.models import ImagePlacement, PlacementSnapshot
 
 log = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-ROTATE_STEP = 0.5        # degrees per arrow keypress
-ROTATE_FINE = 0.1        # degrees with Shift held
-NUDGE_STEP = 1.0         # pixels per arrow keypress
-GRID_SPACING = 100       # pixels between grid lines
-GRID_COLOR = QColor(80, 80, 200, 60)   # subtle blue-grey, low alpha
-DIM_OPACITY = 0.35       # opacity of non-active images on hover
+ROTATE_STEP = 0.5
+ROTATE_FINE = 0.1
+NUDGE_STEP = 1.0
+GRID_SPACING = 100
+GRID_COLOR = QColor(80, 80, 200, 50)
+ZOOM_FACTOR = 1.15
+THUMB_LONG_EDGE = 300   # must match image_store.THUMB_LONG_EDGE
 
 
-# ── Placement state ────────────────────────────────────────────────────────────
+# ImagePlacement and PlacementSnapshot are defined in hockney.core.models
+# and imported above — do not redefine them here.
 
-@dataclass
-class ImagePlacement:
-    """Mutable placement state for one image on the canvas."""
-    image_id: str
-    x: float = 0.0
-    y: float = 0.0
-    rotation: float = 0.0    # degrees
-    z_order: int = 0
-    auto_x: float = 0.0      # LightGlue-suggested position (for reset)
-    auto_y: float = 0.0
-    auto_rotation: float = 0.0
-
-    def reset_to_auto(self):
-        self.x = self.auto_x
-        self.y = self.auto_y
-        self.rotation = self.auto_rotation
-
-    def as_dict(self) -> dict:
-        return {
-            "image_id": self.image_id,
-            "x": self.x,
-            "y": self.y,
-            "rotation": self.rotation,
-            "z_order": self.z_order,
-        }
-
-
-# ── Undo/redo command stack ────────────────────────────────────────────────────
-
-@dataclass
-class PlacementSnapshot:
-    """A moment-in-time snapshot of one image's placement."""
-    image_id: str
-    x: float
-    y: float
-    rotation: float
-    z_order: int
-    removed: bool = False
+# ── Undo/redo ──────────────────────────────────────────────────────────────────
 
 
 class CommandStack:
-    """Simple undo/redo stack for placement operations."""
-
-    def __init__(self, maxlen: int = 200):
+    def __init__(self, maxlen: int = 500):
         self._undo: deque[list[PlacementSnapshot]] = deque(maxlen=maxlen)
         self._redo: deque[list[PlacementSnapshot]] = deque(maxlen=maxlen)
 
@@ -130,53 +94,50 @@ class CommandStack:
         self._undo.append(snap)
         return snap
 
-    def can_undo(self) -> bool:
-        return bool(self._undo)
-
-    def can_redo(self) -> bool:
-        return bool(self._redo)
-
 
 # ── Graphics item ──────────────────────────────────────────────────────────────
 
 class PhotoItem(QGraphicsPixmapItem):
-    """
-    A single photograph on the Tray View canvas.
-    Wraps a QGraphicsPixmapItem with extra state (image_id, placement ref).
-    """
+    """One photograph on the canvas."""
 
     def __init__(self, image_id: str, pixmap: QPixmap, placement: ImagePlacement):
         super().__init__(pixmap)
         self.image_id = image_id
         self.placement = placement
 
+        # Rotate/scale around image centre
         self.setTransformOriginPoint(pixmap.width() / 2, pixmap.height() / 2)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setAcceptHoverEvents(True)
+        self._apply_placement()
 
-        self._sync_from_placement()
-
-    def _sync_from_placement(self):
+    def _apply_placement(self):
         self.setPos(self.placement.x, self.placement.y)
         self.setRotation(self.placement.rotation)
         self.setZValue(self.placement.z_order)
 
-    def sync_to_placement(self):
+    def read_back_placement(self):
+        """Push current item position back into the placement dataclass."""
         pos = self.pos()
         self.placement.x = pos.x()
         self.placement.y = pos.y()
         self.placement.rotation = self.rotation()
         self.placement.z_order = int(self.zValue())
 
+    def hoverEnterEvent(self, event):
+        # Brighten border on hover via opacity trick on siblings (handled in TrayView)
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        super().hoverLeaveEvent(event)
+
 
 # ── Main canvas ────────────────────────────────────────────────────────────────
 
 class TrayView(QGraphicsView):
-    """Central canvas. The primary work surface."""
+    """Central canvas — the primary work surface."""
 
-    # Emitted when the user clicks/activates an image
-    image_activated = pyqtSignal(str)
+    image_activated = pyqtSignal(str)   # image_id of newly active image
 
     def __init__(self, store: ImageStore, parent: QWidget | None = None):
         super().__init__(parent)
@@ -189,9 +150,8 @@ class TrayView(QGraphicsView):
         self._items: dict[str, PhotoItem] = {}
         self._active_id: Optional[str] = None
         self._grid_visible = False
-        self._grid_items: list[QGraphicsRectItem] = []
-        self._commands = CommandStack()
         self._removed_ids: set[str] = set()
+        self._commands = CommandStack()
 
         self._configure_view()
 
@@ -201,23 +161,21 @@ class TrayView(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setBackgroundBrush(QColor(30, 30, 30))   # dark grey canvas background
+        self.setBackgroundBrush(QColor(28, 28, 28))
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def refresh(self):
-        """Reload all images from the store and redraw the canvas."""
+        """Rebuild canvas from current store contents."""
         self._scene.clear()
         self._items.clear()
+        self._active_id = None
 
         for record in self.store.all_records():
             if record.id in self._removed_ids:
                 continue
 
-            # Create placement if this is a new image
             if record.id not in self._placements:
                 self._placements[record.id] = ImagePlacement(image_id=record.id)
 
@@ -231,62 +189,80 @@ class TrayView(QGraphicsView):
             self._scene.addItem(item)
             self._items[record.id] = item
 
-        self.arrange_grid()  # default layout until auto-place runs
-
     def arrange_grid(self):
         """
-        Fallback layout: arrange all images in a grid.
-        Called when LightGlue isn't available or overlap is insufficient.
+        Arrange all images in a grid — used as fallback when LightGlue
+        isn't available or overlap between a pair is insufficient.
+        Logged so the photographer knows it happened.
         """
         records = [r for r in self.store.all_records() if r.id not in self._removed_ids]
         if not records:
             return
 
-        cols = max(1, int(len(records) ** 0.5))
-        thumb_w = 300
-        thumb_h = 200
-        padding = 20
+        n = len(records)
+        cols = max(1, math.isqrt(n))
+        padding = 24
 
         for i, record in enumerate(records):
             col = i % cols
             row = i // cols
-            placement = self._placements.get(record.id)
-            if placement is None:
-                continue
-            x = col * (thumb_w + padding)
-            y = row * (thumb_h + padding)
-            placement.x = placement.auto_x = float(x)
-            placement.y = placement.auto_y = float(y)
-            placement.rotation = placement.auto_rotation = 0.0
-            if record.id in self._items:
-                self._items[record.id]._sync_from_placement()
 
-        log.info("Grid layout applied to %d images (%d columns)", len(records), cols)
+            # Use actual aspect ratio for spacing
+            aspect = record.width / max(record.height, 1)
+            if aspect >= 1:
+                tw = THUMB_LONG_EDGE
+                th = int(THUMB_LONG_EDGE / aspect)
+            else:
+                tw = int(THUMB_LONG_EDGE * aspect)
+                th = THUMB_LONG_EDGE
+
+            x = float(col * (THUMB_LONG_EDGE + padding))
+            y = float(row * (th + padding))
+
+            p = self._placements.get(record.id)
+            if p:
+                p.x = p.auto_x = x
+                p.y = p.auto_y = y
+                p.rotation = p.auto_rotation = 0.0
+                p.z_order = i
+                item = self._items.get(record.id)
+                if item:
+                    item._apply_placement()
+
+        log.info("Grid fallback: %d images, %d columns", n, cols)
 
     def set_placements(self, placements: list[ImagePlacement]):
-        """Apply LightGlue-computed placements to all images."""
-        snapshot_before = self._snapshot_all()
+        """Apply computed placements (from PlacementWorker) to all images."""
+        snap_before = self._snapshot_all()
         for p in placements:
             self._placements[p.image_id] = p
-            if p.image_id in self._items:
-                self._items[p.image_id]._sync_from_placement()
-        self._commands.push(snapshot_before)
+            item = self._items.get(p.image_id)
+            if item:
+                item.placement = p
+                item._apply_placement()
+        self._commands.push(snap_before)
+        self._update_scene_rect()
+
+    def fit_all(self):
+        """Zoom and pan so all images are visible."""
+        rect = self._scene.itemsBoundingRect()
+        if rect.isNull():
+            return
+        # Add a small margin
+        margin = 40
+        rect.adjust(-margin, -margin, margin, margin)
+        self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
 
     def all_placements(self) -> list[ImagePlacement]:
         return list(self._placements.values())
 
-    # ── Active image ───────────────────────────────────────────────────────────
+    # ── Activation ─────────────────────────────────────────────────────────────
 
     def _activate(self, image_id: str):
-        prev = self._active_id
         self._active_id = image_id
-
+        # Dim everything else, full opacity on active
         for iid, item in self._items.items():
-            if iid == image_id:
-                item.setOpacity(1.0)
-            elif prev is not None:
-                item.setOpacity(1.0)  # restore on deactivation
-
+            item.setOpacity(1.0 if iid == image_id else 0.45)
         self.image_activated.emit(image_id)
 
     def _deactivate_all(self):
@@ -294,15 +270,24 @@ class TrayView(QGraphicsView):
         for item in self._items.values():
             item.setOpacity(1.0)
 
-    # ── Keyboard control ───────────────────────────────────────────────────────
+    # ── Keyboard ───────────────────────────────────────────────────────────────
 
     def keyPressEvent(self, event: QKeyEvent):
+        key = event.key()
+        mod = event.modifiers()
+
+        # G and F work without an active image
+        if key == Qt.Key.Key_G:
+            self.toggle_grid()
+            return
+        if key == Qt.Key.Key_F:
+            self.fit_all()
+            return
+
         if self._active_id is None:
             super().keyPressEvent(event)
             return
 
-        key = event.key()
-        mod = event.modifiers()
         placement = self._placements.get(self._active_id)
         if placement is None:
             return
@@ -326,9 +311,6 @@ class TrayView(QGraphicsView):
             placement.z_order += 1
         elif key == Qt.Key.Key_R:
             placement.reset_to_auto()
-        elif key == Qt.Key.Key_G:
-            self.toggle_grid()
-            changed = False
         elif key == Qt.Key.Key_Delete:
             self._remove_active()
             changed = False
@@ -340,7 +322,7 @@ class TrayView(QGraphicsView):
             self._commands.push([snap_before])
             item = self._items.get(self._active_id)
             if item:
-                item._sync_from_placement()
+                item._apply_placement()
 
     # ── Undo / redo ────────────────────────────────────────────────────────────
 
@@ -365,7 +347,7 @@ class TrayView(QGraphicsView):
             p.z_order = snap.z_order
             item = self._items.get(snap.image_id)
             if item:
-                item._sync_from_placement()
+                item._apply_placement()
                 item.setVisible(not snap.removed)
 
     # ── Remove ─────────────────────────────────────────────────────────────────
@@ -379,7 +361,9 @@ class TrayView(QGraphicsView):
         item = self._items.get(self._active_id)
         if item:
             item.setVisible(False)
+        log.info("Removed: %s (undoable)", self._active_id)
         self._active_id = None
+        self._deactivate_all()
 
     # ── Grid overlay ───────────────────────────────────────────────────────────
 
@@ -413,7 +397,7 @@ class TrayView(QGraphicsView):
 
     def wheelEvent(self, event: QWheelEvent):
         delta = event.angleDelta().y()
-        factor = 1.15 if delta > 0 else 1 / 1.15
+        factor = ZOOM_FACTOR if delta > 0 else 1 / ZOOM_FACTOR
         self.scale(factor, factor)
 
     def mousePressEvent(self, event):
@@ -447,13 +431,18 @@ class TrayView(QGraphicsView):
     def _snapshot_all(self) -> list[PlacementSnapshot]:
         return [self._snapshot_one(iid) for iid in self._placements]
 
+    def _update_scene_rect(self):
+        """Expand scene rect to fit all items with margin."""
+        rect = self._scene.itemsBoundingRect()
+        margin = 200
+        self._scene.setSceneRect(rect.adjusted(-margin, -margin, margin, margin))
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _numpy_to_pixmap(arr: np.ndarray) -> QPixmap:
-    """Convert an HxWx3 uint8 numpy array to a QPixmap."""
+    """Convert HxWx3 uint8 numpy array to QPixmap."""
     h, w, ch = arr.shape
     assert ch == 3
-    bytes_per_line = w * 3
-    qimage = QImage(arr.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+    qimage = QImage(arr.data, w, h, w * 3, QImage.Format.Format_RGB888)
     return QPixmap.fromImage(qimage)

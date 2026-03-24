@@ -13,6 +13,8 @@ Layout:
   ├───────────────────┴──────────────────────┤
   │  Status bar                              │
   └──────────────────────────────────────────┘
+
+Drag-and-drop a folder or image files anywhere onto the window to load.
 """
 
 from __future__ import annotations
@@ -20,19 +22,19 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
-    QLabel,
     QMainWindow,
+    QMessageBox,
     QProgressDialog,
     QSplitter,
     QStatusBar,
     QToolBar,
     QWidget,
 )
-from PyQt6.QtGui import QAction, QKeySequence
 
 from hockney.core.image_store import ImageStore, ScratchSession, check_scratch_disk_space
 from hockney.ui.tray_view import TrayView
@@ -61,6 +63,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1400, 900)
+        self.setAcceptDrops(True)   # enable drag-and-drop onto the window
 
         self._build_ui()
         self._build_menus()
@@ -68,11 +71,11 @@ class MainWindow(QMainWindow):
         self._connect_signals()
 
         if download_model_on_open:
-            # Defer to after the window is shown
-            from PyQt6.QtCore import QTimer
             QTimer.singleShot(500, self._start_model_download)
 
-        self._update_status("Ready. Load images to begin.")
+        self._update_status(
+            "Ready — drag a folder of images here, or use File → Load."
+        )
 
     # ── UI construction ────────────────────────────────────────────────────────
 
@@ -95,7 +98,7 @@ class MainWindow(QMainWindow):
         self.sidebar.setMaximumWidth(340)
         splitter.addWidget(self.sidebar)
 
-        splitter.setStretchFactor(0, 3)   # Tray View gets most of the space
+        splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
 
         self.status_bar = QStatusBar()
@@ -104,7 +107,6 @@ class MainWindow(QMainWindow):
     def _build_menus(self):
         menubar = self.menuBar()
 
-        # File menu
         file_menu = menubar.addMenu("&File")
 
         load_action = QAction("&Load Images…", self)
@@ -141,7 +143,6 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
-        # Edit menu
         edit_menu = menubar.addMenu("&Edit")
 
         undo_action = QAction("&Undo", self)
@@ -154,26 +155,33 @@ class MainWindow(QMainWindow):
         redo_action.triggered.connect(self.tray_view.redo)
         edit_menu.addAction(redo_action)
 
-        # View menu
         view_menu = menubar.addMenu("&View")
 
-        grid_action = QAction("Toggle &Grid", self)
-        grid_action.setShortcut(QKeySequence("G"))
+        grid_action = QAction("Toggle &Grid  [G]", self)
         grid_action.triggered.connect(self.tray_view.toggle_grid)
         view_menu.addAction(grid_action)
+
+        fit_action = QAction("&Fit All in View", self)
+        fit_action.setShortcut(QKeySequence("F"))
+        fit_action.triggered.connect(self.tray_view.fit_all)
+        view_menu.addAction(fit_action)
 
     def _build_toolbar(self):
         toolbar = QToolBar("Main Toolbar")
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        load_btn = QAction("Load Images", self)
+        load_btn = QAction("Load Folder…", self)
         load_btn.triggered.connect(self.load_folder)
         toolbar.addAction(load_btn)
 
+        load_files_btn = QAction("Load Images…", self)
+        load_files_btn.triggered.connect(self.load_images)
+        toolbar.addAction(load_files_btn)
+
         toolbar.addSeparator()
 
-        self.process_btn = QAction("Auto-Place", self)
+        self.process_btn = QAction("Auto-Place  [LightGlue]", self)
         self.process_btn.triggered.connect(self.auto_place)
         self.process_btn.setEnabled(False)
         toolbar.addAction(self.process_btn)
@@ -187,7 +195,25 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.sidebar.process_requested.connect(self._on_process_requested)
         self.tray_view.image_activated.connect(self._on_image_activated)
-        self.store  # (store signals wired up as methods are added)
+
+    # ── Drag and drop ──────────────────────────────────────────────────────────
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        paths = [Path(u.toLocalFile()) for u in urls]
+
+        folders = [p for p in paths if p.is_dir()]
+        files = [p for p in paths if p.is_file()]
+
+        if folders:
+            # If a folder was dropped, load it (first one wins)
+            self._load_path(folders[0], is_folder=True)
+        elif files:
+            self._load_path(files, is_folder=False)
 
     # ── Load ───────────────────────────────────────────────────────────────────
 
@@ -209,57 +235,72 @@ class MainWindow(QMainWindow):
         self._load_path([Path(p) for p in paths], is_folder=False)
 
     def _load_path(self, path, is_folder: bool):
-        # Quick space check before committing
-        n_estimate = 500  # conservative estimate when loading a folder
+        n_estimate = 200
         ok, msg = check_scratch_disk_space(self.session.scratch_root, n_estimate)
         if not ok:
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Scratch Disk Space", msg)
 
-        self._update_status("Loading images…")
+        self._update_status("Loading images… (thumbnails generating)")
+        self.process_btn.setEnabled(False)
 
         worker = LoadWorker(self.store, path, is_folder)
-        progress = QProgressDialog("Loading images…", "Cancel", 0, 0, self)
+        progress = QProgressDialog("Loading images…", None, 0, 0, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setWindowTitle("Loading")
         progress.show()
 
         worker.finished.connect(lambda count: self._on_load_finished(count, progress))
         worker.error.connect(lambda msg: self._on_load_error(msg, progress))
         worker.start()
-        self._load_worker = worker  # keep reference
+        self._load_worker = worker
 
     def _on_load_finished(self, count: int, progress: QProgressDialog):
         progress.close()
-        self._update_status(f"Loaded {count} images.")
         self.tray_view.refresh()
+        self.sidebar.refresh()
+        self.tray_view.fit_all()
         self.process_btn.setEnabled(count > 0)
+        model_note = "" if self.model_ready else " — LightGlue not downloaded, using grid layout"
+        self._update_status(f"{count} images loaded{model_note}.")
         log.info("Load complete: %d images", count)
 
     def _on_load_error(self, msg: str, progress: QProgressDialog):
         progress.close()
-        from PyQt6.QtWidgets import QMessageBox
         QMessageBox.critical(self, "Load Error", msg)
 
     # ── Auto-place ─────────────────────────────────────────────────────────────
 
     def auto_place(self):
-        """Run LightGlue matching and position all images."""
-        if not self.model_ready:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.information(
-                self,
-                "Model Not Ready",
-                "The LightGlue model has not been downloaded yet.\n"
-                "Auto-place requires the AI model. Images will be arranged in a grid.",
-            )
-            self.tray_view.arrange_grid()
-            return
+        from hockney.core.placement import PlacementWorker
 
-        self._update_status("Running LightGlue feature matching…")
-        # TODO: wire up PlacementWorker (hockney/core/placement.py)
+        self._update_status("Computing placements…")
+        self.process_btn.setEnabled(False)
+
+        worker = PlacementWorker(self.store, self.model_ready, self.models_dir)
+        progress = QProgressDialog("Computing placements…", None, 0, 100, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setWindowTitle("Auto-Place")
+        progress.show()
+
+        worker.progress.connect(progress.setValue)
+        worker.finished.connect(lambda result: self._on_placement_finished(result, progress))
+        worker.error.connect(lambda msg: self._on_placement_error(msg, progress))
+        worker.start()
+        self._placement_worker = worker
+
+    def _on_placement_finished(self, result, progress: QProgressDialog):
+        progress.close()
+        self.tray_view.set_placements(result.placements)
+        self.tray_view.fit_all()
+        self.process_btn.setEnabled(True)
+        self._update_status(result.message)
+
+    def _on_placement_error(self, msg: str, progress: QProgressDialog):
+        progress.close()
+        self.process_btn.setEnabled(True)
+        QMessageBox.critical(self, "Placement Error", msg)
 
     def _on_process_requested(self, settings: dict):
-        """Called by sidebar when user clicks Process."""
         self.auto_place()
 
     # ── Project ────────────────────────────────────────────────────────────────
@@ -269,7 +310,9 @@ class MainWindow(QMainWindow):
             self, "Open Project", "", "Hockney Project (*.json)"
         )
         if path:
-            # TODO: load project from JSON
+            self.store.load_meta(Path(path))
+            self.tray_view.refresh()
+            self.sidebar.refresh()
             self._update_status(f"Opened: {Path(path).name}")
 
     def save_project(self):
@@ -300,9 +343,7 @@ class MainWindow(QMainWindow):
         progress = QProgressDialog(
             "Downloading LightGlue model…\nThis will take a few minutes.",
             "Cancel",
-            0,
-            100,
-            self,
+            0, 100, self,
         )
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.show()
@@ -321,12 +362,11 @@ class MainWindow(QMainWindow):
 
     def _on_model_error(self, msg: str, progress: QProgressDialog):
         progress.close()
-        from PyQt6.QtWidgets import QMessageBox
         QMessageBox.warning(
             self,
             "Model Download Failed",
             f"Could not download the LightGlue model:\n{msg}\n\n"
-            "Auto-place will use grid fallback until the model is available.",
+            "Auto-place will use grid layout until the model is available.",
         )
 
     # ── Misc ───────────────────────────────────────────────────────────────────
@@ -339,14 +379,12 @@ class MainWindow(QMainWindow):
         log.info(msg)
 
     def closeEvent(self, event):
-        # Scratch session cleanup happens in main() after app.exec() returns
         event.accept()
 
 
 # ── Background workers ─────────────────────────────────────────────────────────
 
 class LoadWorker(QThread):
-    """Loads images in a background thread so the UI stays responsive."""
     finished = pyqtSignal(int)
     error = pyqtSignal(str)
 
