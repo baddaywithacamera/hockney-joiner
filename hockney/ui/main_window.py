@@ -52,6 +52,7 @@ class MainWindow(QMainWindow):
         models_dir: Path,
         model_ready: bool,
         download_model_on_open: bool,
+        download_moondream_on_open: bool = False,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -72,6 +73,10 @@ class MainWindow(QMainWindow):
 
         if download_model_on_open:
             QTimer.singleShot(500, self._start_model_download)
+
+        if download_moondream_on_open:
+            # Stagger slightly so LightGlue dialog (if also downloading) appears first
+            QTimer.singleShot(800, self._start_moondream_download)
 
         self._update_status(
             "Ready — drag a folder of images here, or use File → Load."

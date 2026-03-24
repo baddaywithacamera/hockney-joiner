@@ -4,6 +4,7 @@ main.py — Entry point for the Hockney Joiner Assembly Tool.
 Handles:
   - Scratch disk selection (asked once, remembered in prefs)
   - First-run LightGlue model download prompt
+  - First-run moondream2 model download prompt
   - PyQt application startup
 """
 
@@ -34,6 +35,7 @@ from hockney.core.image_store import (
     check_scratch_disk_space,
 )
 from hockney.installer.model_fetch import is_model_ready
+from hockney.core.vision_chat import is_moondream_ready
 from hockney.ui.main_window import MainWindow
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -136,6 +138,30 @@ class ScratchDiskDialog(QDialog):
             self._path_label.setText(f"Current selection: {self.chosen_path}")
 
 
+def prompt_moondream_download(parent: QWidget | None = None) -> bool:
+    """
+    Ask the user whether to download moondream2 for the composition chat panel.
+    Returns True if they want to proceed.
+    """
+    result = QMessageBox.question(
+        parent,
+        "Composition Chat Model",
+        (
+            "<b>moondream2 vision model not found.</b><br><br>"
+            "Hockney Joiner includes a chat panel that lets you ask questions about "
+            "your composite — things like <i>\"which images look redundant?\"</i> "
+            "or <i>\"what's the overall mood?\"</i><br><br>"
+            "moondream2 is open source, runs fully offline, and is about 1.7 GB. "
+            "It downloads once and is stored locally — no cloud connection needed.<br><br>"
+            "You can skip this now and download later via <b>Help → Download Composition AI</b>.<br><br>"
+            "Download now?"
+        ),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+    )
+    return result == QMessageBox.StandardButton.Yes
+
+
 def prompt_model_download(parent: QWidget | None = None) -> bool:
     """
     Inform the user that LightGlue needs to be downloaded and ask for consent.
@@ -185,8 +211,6 @@ def main():
     model_ready = is_model_ready(models_dir)
     if not model_ready:
         if prompt_model_download():
-            # Kick off the download — done inside the main window so we can
-            # show progress. Pass the intent to the window.
             download_model = True
         else:
             download_model = False
@@ -194,12 +218,24 @@ def main():
     else:
         download_model = False
 
+    # ── Moondream check ───────────────────────────────────────────────────────
+    moondream_ready = is_moondream_ready(models_dir)
+    if not moondream_ready:
+        if prompt_moondream_download():
+            download_moondream = True
+        else:
+            download_moondream = False
+            log.info("User declined moondream download — composition chat will be disabled.")
+    else:
+        download_moondream = False
+
     # ── Main window ───────────────────────────────────────────────────────────
     window = MainWindow(
         session=session,
         models_dir=models_dir,
         model_ready=model_ready,
         download_model_on_open=download_model,
+        download_moondream_on_open=download_moondream,
     )
     window.show()
 
