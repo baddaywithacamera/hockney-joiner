@@ -38,22 +38,31 @@ def is_moondream_ready(models_dir: Path) -> bool:
 
 
 def _ensure_transformers() -> bool:
-    """Install transformers + Pillow if missing. Returns True on success."""
-    try:
-        import transformers  # noqa: F401
+    """Install transformers + dependencies if missing. Returns True on success."""
+    missing = []
+    for pkg, import_name in [
+        ("transformers", "transformers"),
+        ("einops", "einops"),
+        ("pyvips", "pyvips"),
+    ]:
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing.append(pkg)
+
+    if not missing:
         return True
-    except ImportError:
-        pass
-    log.info("transformers not found — installing…")
+
+    log.info("Installing missing packages: %s", missing)
     try:
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "transformers", "Pillow", "einops"],
+            [sys.executable, "-m", "pip", "install"] + missing,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
         return True
     except Exception as e:
-        log.error("Failed to install transformers: %s", e)
+        log.error("Failed to install packages %s: %s", missing, e)
         return False
 
 

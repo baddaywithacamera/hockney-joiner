@@ -15,6 +15,7 @@ lightglue @ git+https://github.com/cvg/LightGlue.git
 # Vision-language model (moondream2 via transformers)
 transformers>=4.38.0
 einops>=0.7.0
+pyvips>=2.2.0
 
 # Model delivery
 huggingface_hub>=0.20.0
