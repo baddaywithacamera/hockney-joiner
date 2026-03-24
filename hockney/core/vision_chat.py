@@ -66,18 +66,41 @@ def _ensure_deps() -> bool:
         return False
 
 
+def _patch_config(config):
+    """
+    Newer transformers removed pad_token_id from PhiConfig, but moondream2's
+    custom code still references it. Patch it in if missing so the model
+    loads without crashing.
+    """
+    if not hasattr(config, "pad_token_id") or config.pad_token_id is None:
+        config.pad_token_id = getattr(config, "eos_token_id", 0)
+    return config
+
+
 def _load_model(models_dir: Path):
     """Load moondream2 from the local cache, returns (model, tokenizer)."""
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     cache_dir = str(models_dir)
+
+    # Load and patch config first to avoid PhiConfig attribute errors
+    config = AutoConfig.from_pretrained(
+        MOONDREAM_MODEL_ID,
+        revision=MOONDREAM_REVISION,
+        trust_remote_code=True,
+        cache_dir=cache_dir,
+        local_files_only=True,
+    )
+    _patch_config(config)
+
     model = AutoModelForCausalLM.from_pretrained(
         MOONDREAM_MODEL_ID,
         revision=MOONDREAM_REVISION,
         trust_remote_code=True,
         cache_dir=cache_dir,
         local_files_only=True,
+        config=config,
         torch_dtype=torch.float32,
     )
     tokenizer = AutoTokenizer.from_pretrained(
@@ -186,7 +209,7 @@ class MoondreamDownloadWorker(QThread):
 
         try:
             import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
             log.info("Downloading moondream2 weights (~2 GB)…")
             self.progress.emit(15)
@@ -200,12 +223,22 @@ class MoondreamDownloadWorker(QThread):
             )
             self.progress.emit(30)
 
+            # Download config and patch PhiConfig compatibility issue
+            config = AutoConfig.from_pretrained(
+                MOONDREAM_MODEL_ID,
+                revision=MOONDREAM_REVISION,
+                trust_remote_code=True,
+                cache_dir=str(self.models_dir),
+            )
+            _patch_config(config)
+
             # Download model weights (the big one)
             AutoModelForCausalLM.from_pretrained(
                 MOONDREAM_MODEL_ID,
                 revision=MOONDREAM_REVISION,
                 trust_remote_code=True,
                 cache_dir=str(self.models_dir),
+                config=config,
                 torch_dtype=torch.float32,
             )
             self.progress.emit(95)
