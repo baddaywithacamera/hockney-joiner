@@ -30,7 +30,9 @@ from PyQt6.QtCore import QThread, pyqtSignal
 log = logging.getLogger(__name__)
 
 MOONDREAM_MODEL_ID = "vikhyatk/moondream2"
-MOONDREAM_REVISION = "2025-01-09"   # pinned release
+MOONDREAM_REVISION = "2025-06-21"   # latest stable release tag
+MOONDREAM_FILENAME_GZ = "moondream-2b-int8.mf.gz"   # compressed on HF
+MOONDREAM_FILENAME    = "moondream-2b-int8.mf"       # decompressed local name
 READY_MARKER = "moondream_ready"
 
 
@@ -81,7 +83,7 @@ class VisionQueryWorker(QThread):
                 return
 
         try:
-            model_path = str(self._models_dir / "moondream-2b-int8.mf")
+            model_path = str(self._models_dir / MOONDREAM_FILENAME)
             model = md.vl(model=model_path)
             encoded = model.encode_image(self._image)
             answer = model.query(encoded, self._question)["answer"]
@@ -147,7 +149,7 @@ class MoondreamDownloadWorker(QThread):
             log.info("moondream package installed.")
 
         self.models_dir.mkdir(parents=True, exist_ok=True)
-        model_path = self.models_dir / "moondream-2b-int8.mf"
+        model_path = self.models_dir / MOONDREAM_FILENAME
 
         if model_path.exists():
             log.info("Moondream model already present.")
@@ -157,20 +159,28 @@ class MoondreamDownloadWorker(QThread):
             return
 
         try:
-            # moondream package handles the download when model= points to a
-            # non-existent local path and falls back to fetching the revision
-            log.info("Downloading moondream2 (~1.7GB)…")
+            import gzip
+            import shutil
+
+            log.info("Downloading moondream2 (~1.7 GB compressed)…")
             self.progress.emit(10)
 
-            # Use huggingface_hub to download the specific model file
             from huggingface_hub import hf_hub_download
-            downloaded = hf_hub_download(
+            gz_path = hf_hub_download(
                 repo_id=MOONDREAM_MODEL_ID,
-                filename="moondream-2b-int8.mf",
+                filename=MOONDREAM_FILENAME_GZ,
                 revision=MOONDREAM_REVISION,
                 local_dir=str(self.models_dir),
             )
-            log.info("Downloaded to: %s", downloaded)
+            log.info("Downloaded compressed model to: %s", gz_path)
+            self.progress.emit(80)
+
+            # Decompress .mf.gz → .mf
+            log.info("Decompressing model…")
+            with gzip.open(gz_path, "rb") as f_in, open(model_path, "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+            Path(gz_path).unlink(missing_ok=True)   # remove the .gz to save space
+            log.info("Decompressed to: %s", model_path)
             self.progress.emit(95)
 
         except Exception as e:
