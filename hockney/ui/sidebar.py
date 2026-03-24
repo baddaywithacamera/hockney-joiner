@@ -18,6 +18,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from pathlib import Path
+
 from hockney.core.image_store import ImageStore
 
 FILTER_OPTIONS = [
@@ -28,11 +30,13 @@ FILTER_OPTIONS = [
 
 
 class Sidebar(QWidget):
-    process_requested = pyqtSignal(dict)   # emits settings dict when user hits Process
+    process_requested = pyqtSignal(dict)
 
-    def __init__(self, store: ImageStore, parent: QWidget | None = None):
+    def __init__(self, store: ImageStore, models_dir: Path | None = None,
+                 parent: QWidget | None = None):
         super().__init__(parent)
         self.store = store
+        self.models_dir = models_dir
         self._build_ui()
 
     def _build_ui(self):
@@ -87,6 +91,14 @@ class Sidebar(QWidget):
         self.process_btn.setToolTip("Run LightGlue feature matching and place images.")
         self.process_btn.clicked.connect(self._on_process_clicked)
         layout.addWidget(self.process_btn)
+
+        # ── Moondream chat ────────────────────────────────────────────────────
+        if self.models_dir:
+            from hockney.ui.chat_panel import ChatPanel
+            self.chat_panel = ChatPanel(self.models_dir, parent=self)
+            layout.addWidget(self.chat_panel)
+        else:
+            self.chat_panel = None
 
         layout.addStretch()
 

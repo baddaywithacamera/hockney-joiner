@@ -152,6 +152,8 @@ class TrayView(QGraphicsView):
         self._grid_visible = False
         self._removed_ids: set[str] = set()
         self._commands = CommandStack()
+        self._highlighted_ids: set[str] = set()   # moondream-flagged images
+        self._highlight_timer = None
 
         self._configure_view()
 
@@ -250,10 +252,57 @@ class TrayView(QGraphicsView):
         rect = self._scene.itemsBoundingRect()
         if rect.isNull():
             return
-        # Add a small margin
         margin = 40
         rect.adjust(-margin, -margin, margin, margin)
         self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def highlight_by_index(self, one_based_indices: list[int]):
+        """
+        Highlight images by their 1-based position in the sorted placement list.
+        Called when moondream returns index references in its response.
+        Highlighted images pulse with a coloured border. Clears on any keypress
+        or after 30 seconds.
+        """
+        from PyQt6.QtCore import QTimer
+        sorted_p = sorted(self._placements.values(), key=lambda p: p.z_order)
+        self._highlighted_ids = set()
+        for idx in one_based_indices:
+            if 1 <= idx <= len(sorted_p):
+                self._highlighted_ids.add(sorted_p[idx - 1].image_id)
+
+        self._apply_highlight()
+
+        # Auto-clear after 30 seconds
+        if self._highlight_timer:
+            self._highlight_timer.stop()
+        self._highlight_timer = QTimer(self)
+        self._highlight_timer.setSingleShot(True)
+        self._highlight_timer.timeout.connect(self.clear_highlight)
+        self._highlight_timer.start(30_000)
+
+    def clear_highlight(self):
+        """Remove moondream highlight from all images."""
+        self._highlighted_ids.clear()
+        self._apply_highlight()
+        if self._highlight_timer:
+            self._highlight_timer.stop()
+
+    def _apply_highlight(self):
+        """Set opacity: highlighted=1.0, others=0.35 if any highlighted, else all 1.0."""
+        if not self._highlighted_ids:
+            for item in self._items.values():
+                item.setOpacity(1.0)
+            return
+        for iid, item in self._items.items():
+            item.setOpacity(1.0 if iid in self._highlighted_ids else 0.35)
+
+    def render_contact_sheet(self) -> Optional["Image"]:
+        """Render a numbered contact sheet for moondream analysis."""
+        from hockney.core.export import render_contact_sheet
+        placements = list(self._placements.values())
+        if not placements:
+            return None
+        return render_contact_sheet(placements, self.store)
 
     def all_placements(self) -> list[ImagePlacement]:
         return list(self._placements.values())
@@ -277,6 +326,10 @@ class TrayView(QGraphicsView):
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
         mod = event.modifiers()
+
+        # Any keypress clears moondream highlight
+        if self._highlighted_ids:
+            self.clear_highlight()
 
         # G and F work without an active image
         if key == Qt.Key.Key_G:

@@ -93,7 +93,7 @@ class MainWindow(QMainWindow):
         self.tray_view = TrayView(self.store, parent=self)
         splitter.addWidget(self.tray_view)
 
-        self.sidebar = Sidebar(self.store, parent=self)
+        self.sidebar = Sidebar(self.store, models_dir=self.models_dir, parent=self)
         self.sidebar.setMinimumWidth(240)
         self.sidebar.setMaximumWidth(340)
         splitter.addWidget(self.sidebar)
@@ -155,6 +155,17 @@ class MainWindow(QMainWindow):
         redo_action.triggered.connect(self.tray_view.redo)
         edit_menu.addAction(redo_action)
 
+        # Help menu
+        help_menu = menubar.addMenu("&Help")
+
+        dl_lg = QAction("Download LightGlue (auto-place)…", self)
+        dl_lg.triggered.connect(self._start_model_download)
+        help_menu.addAction(dl_lg)
+
+        dl_md = QAction("Download Moondream (composition chat)…", self)
+        dl_md.triggered.connect(self._start_moondream_download)
+        help_menu.addAction(dl_md)
+
         view_menu = menubar.addMenu("&View")
 
         grid_action = QAction("Toggle &Grid  [G]", self)
@@ -195,6 +206,9 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.sidebar.process_requested.connect(self._on_process_requested)
         self.tray_view.image_activated.connect(self._on_image_activated)
+        # Connect moondream chat panel to the tray view
+        if self.sidebar.chat_panel:
+            self.sidebar.chat_panel.set_tray_view(self.tray_view)
 
     # ── Drag and drop ──────────────────────────────────────────────────────────
 
@@ -326,15 +340,44 @@ class MainWindow(QMainWindow):
     # ── Export ─────────────────────────────────────────────────────────────────
 
     def export(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Composite",
-            "joiner.tif",
-            "TIFF (*.tif *.tiff);;PNG (*.png);;JPEG (*.jpg)",
-        )
-        if path:
-            self._update_status(f"Exporting to {Path(path).name}…")
-            # TODO: wire up ExportWorker (hockney/core/export.py)
+        from hockney.ui.export_dialog import ExportDialog
+        dialog = ExportDialog(self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+
+        output_path = dialog.output_path
+        scale_mode = dialog.scale_mode
+        if not output_path:
+            return
+
+        placements = self.tray_view.all_placements()
+        if not placements:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Nothing to export", "Load and arrange some images first.")
+            return
+
+        from hockney.core.export import ExportWorker
+        worker = ExportWorker(placements, self.store, Path(output_path), scale_mode)
+
+        progress = QProgressDialog("Rendering composite…", None, 0, 100, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setWindowTitle("Exporting")
+        progress.show()
+
+        worker.progress.connect(progress.setValue)
+        worker.finished.connect(lambda p: self._on_export_finished(p, progress))
+        worker.error.connect(lambda msg: self._on_export_error(msg, progress))
+        worker.start()
+        self._export_worker = worker
+
+    def _on_export_finished(self, path: str, progress: QProgressDialog):
+        progress.close()
+        self._update_status(f"Exported: {Path(path).name}")
+        QMessageBox.information(self, "Export Complete", f"Saved to:\n{path}")
+
+    def _on_export_error(self, msg: str, progress: QProgressDialog):
+        progress.close()
+        QMessageBox.critical(self, "Export Failed", msg)
 
     # ── Model download ─────────────────────────────────────────────────────────
 
@@ -368,6 +411,38 @@ class MainWindow(QMainWindow):
             f"Could not download the LightGlue model:\n{msg}\n\n"
             "Auto-place will use grid layout until the model is available.",
         )
+
+    def _start_moondream_download(self):
+        result = QMessageBox.question(
+            self,
+            "Download Moondream",
+            "<b>Download Moondream2 vision model?</b><br><br>"
+            "~1.7 GB download. Runs fully offline after download.<br>"
+            "Enables the composition chat panel in the sidebar.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+
+        from hockney.core.vision_chat import MoondreamDownloadWorker
+        progress = QProgressDialog("Downloading Moondream (~1.7 GB)…", None, 0, 100, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.show()
+
+        worker = MoondreamDownloadWorker(self.models_dir)
+        worker.progress.connect(progress.setValue)
+        worker.finished.connect(lambda: self._on_moondream_ready(progress))
+        worker.error.connect(lambda msg: self._on_moondream_error(msg, progress))
+        worker.start()
+        self._moondream_worker = worker
+
+    def _on_moondream_ready(self, progress: QProgressDialog):
+        progress.close()
+        self._update_status("Moondream ready — composition chat available.")
+
+    def _on_moondream_error(self, msg: str, progress: QProgressDialog):
+        progress.close()
+        QMessageBox.warning(self, "Moondream Download Failed", msg)
 
     # ── Misc ───────────────────────────────────────────────────────────────────
 
