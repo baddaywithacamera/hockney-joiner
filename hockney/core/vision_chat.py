@@ -13,6 +13,7 @@ In the Hockney Joiner context it does two jobs:
 The photographer always decides. Moondream advises.
 
 Backend: transformers + vikhyatk/moondream2 (standard HuggingFace safetensors).
+Revision 2024-08-26 — last stable release using only PIL (no pyvips/libvips).
 No proprietary file formats, no API keys, no cloud connection at runtime.
 """
 
@@ -29,7 +30,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 log = logging.getLogger(__name__)
 
 MOONDREAM_MODEL_ID = "vikhyatk/moondream2"
-MOONDREAM_REVISION = "2025-01-09"   # stable tagged release; safetensors weights
+MOONDREAM_REVISION = "2024-08-26"   # last stable release; PIL only, no pyvips
 READY_MARKER = "moondream_ready"
 
 
@@ -37,13 +38,12 @@ def is_moondream_ready(models_dir: Path) -> bool:
     return (models_dir / READY_MARKER).exists()
 
 
-def _ensure_transformers() -> bool:
-    """Install transformers + dependencies if missing. Returns True on success."""
+def _ensure_deps() -> bool:
+    """Install transformers + einops if missing. Returns True on success."""
     missing = []
     for pkg, import_name in [
         ("transformers", "transformers"),
         ("einops", "einops"),
-        ("pyvips", "pyvips"),
     ]:
         try:
             __import__(import_name)
@@ -114,9 +114,9 @@ class VisionQueryWorker(QThread):
         self._models_dir = models_dir
 
     def run(self):
-        if not _ensure_transformers():
+        if not _ensure_deps():
             self.error.emit(
-                "Could not install transformers.\n"
+                "Could not install required packages.\n"
                 "Please run:  pip install transformers einops"
             )
             return
@@ -153,7 +153,7 @@ def _extract_indices(text: str) -> list[int]:
 class MoondreamDownloadWorker(QThread):
     """
     Downloads moondream2 weights from HuggingFace using the transformers cache.
-    Uses standard safetensors format — no custom file formats.
+    Uses standard safetensors format — no custom file formats, no pyvips.
     """
 
     progress = pyqtSignal(int)
@@ -167,9 +167,9 @@ class MoondreamDownloadWorker(QThread):
     def run(self):
         self.progress.emit(5)
 
-        if not _ensure_transformers():
+        if not _ensure_deps():
             self.error.emit(
-                "Could not install transformers.\n"
+                "Could not install required packages.\n"
                 "Please run:  pip install transformers einops"
             )
             return
