@@ -393,6 +393,59 @@ def choose_scratch_disk_default() -> Path:
     return Path(tempfile.gettempdir()) / "hockney-joiner"
 
 
+def get_exif_info(source_path: Path) -> dict[str, str]:
+    """
+    Extract shooting info from EXIF data.  Returns a dict with human-readable
+    strings for shutter, aperture, iso, focal_length, and date.
+    Missing fields are omitted — caller should handle partial/empty dicts.
+    """
+    info: dict[str, str] = {}
+    try:
+        img = Image.open(source_path)
+        exif = img.getexif()
+        if not exif:
+            return info
+
+        # ExposureTime (tag 33434)
+        val = exif.get(33434)
+        if val is not None:
+            if hasattr(val, 'numerator'):
+                if val.numerator and val.denominator:
+                    if val.numerator / val.denominator < 1:
+                        info["shutter"] = f"{val.numerator}/{val.denominator}s"
+                    else:
+                        info["shutter"] = f"{float(val):.1f}s"
+            elif isinstance(val, (int, float)):
+                info["shutter"] = f"1/{int(1/val)}s" if val < 1 else f"{val:.1f}s"
+
+        # FNumber (tag 33437)
+        val = exif.get(33437)
+        if val is not None:
+            f_num = float(val) if not hasattr(val, 'numerator') else val.numerator / val.denominator
+            info["aperture"] = f"f/{f_num:.1f}"
+
+        # ISOSpeedRatings (tag 34855)
+        val = exif.get(34855)
+        if val is not None:
+            info["iso"] = f"ISO {val}"
+
+        # FocalLength (tag 37386)
+        val = exif.get(37386)
+        if val is not None:
+            fl = float(val) if not hasattr(val, 'numerator') else val.numerator / val.denominator
+            info["focal_length"] = f"{fl:.0f}mm"
+
+        # DateTimeOriginal (tag 36867)
+        val = exif.get(36867)
+        if val is not None:
+            info["date"] = str(val)
+
+    except Exception as e:
+        log.debug("EXIF read failed for %s: %s", source_path, e)
+
+    return info
+
+
 def check_scratch_disk_space(scratch_root: Path, n_images: int) -> tuple[bool, str]:
     """
     Estimate whether the scratch disk has enough space.

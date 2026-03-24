@@ -44,4 +44,20 @@
 | Type in chat → Ask | Send question to AI about the composite |
 | Clear highlights | Remove AI highlight from flagged images |
 
+## Deal Mode (Shoot Replay)
+| Control | Action |
+|---------|--------|
+| D | Enter Deal Mode — images hide, then appear one-by-one |
+| Spacebar (1st tap) | Show next photo in lower-right corner preview with EXIF info |
+| Spacebar (2nd tap) | Send photo from preview to its calculated table position |
+| ESC | Exit Deal Mode — all remaining images become visible |
+
+Deal Mode sorts images by filename (sequential camera numbering) and reveals
+them one at a time. On entry, a dialog lets you type batch shooting info
+(shutter, aperture, ISO) that applies to every photo in the set — useful for
+cameras without EXIF. Leave fields blank to use per-file EXIF when available;
+batch values override per-file EXIF. A progress indicator (e.g. "12 / 47")
+is shown while dealing. Useful for building joiners photo-by-photo on camera
+and for YouTube videos showing the assembly process in real time.
+
 All z-order and movement operations are undoable via Ctrl+Z.

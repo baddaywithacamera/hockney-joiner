@@ -253,6 +253,16 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
+        self._deal_mode_action = QAction("&Deal Mode  [D]", self)
+        self._deal_mode_action.setCheckable(True)
+        self._deal_mode_action.setToolTip(
+            "Reveal images one-by-one in shooting order (spacebar to advance)"
+        )
+        self._deal_mode_action.triggered.connect(self._toggle_deal_mode)
+        view_menu.addAction(self._deal_mode_action)
+
+        view_menu.addSeparator()
+
         reset_layout_action = QAction("&Reset Panel Layout", self)
         reset_layout_action.setToolTip("Return all panels to their default positions")
         reset_layout_action.triggered.connect(self._reset_panel_layout)
@@ -287,6 +297,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.sidebar.process_requested.connect(self._on_process_requested)
         self.tray_view.image_activated.connect(self._on_image_activated)
+        self.tray_view.deal_mode_changed.connect(self._on_deal_mode_changed)
         # Connect moondream chat panel to the tray view
         if self.sidebar.chat_panel:
             self.sidebar.chat_panel.set_tray_view(self.tray_view)
@@ -558,6 +569,29 @@ class MainWindow(QMainWindow):
 
     def _on_image_activated(self, image_id: str):
         self.sidebar.set_active_image(image_id)
+
+    def _toggle_deal_mode(self, checked: bool):
+        if checked:
+            if self.store.count() == 0:
+                QMessageBox.information(
+                    self, "No Images",
+                    "Load some images first before entering Deal Mode."
+                )
+                self._deal_mode_action.setChecked(False)
+                return
+            self.tray_view.enter_deal_mode()
+            self._update_status(
+                "Deal Mode — spacebar: preview next photo, spacebar again: place it. ESC to exit."
+            )
+        else:
+            self.tray_view.exit_deal_mode()
+            self._update_status("Deal Mode exited.")
+
+    def _on_deal_mode_changed(self, active: bool):
+        """Keep menu checkbox in sync when deal mode is toggled via keyboard."""
+        self._deal_mode_action.setChecked(active)
+        if not active:
+            self._update_status("Deal Mode exited.")
 
     def _change_scratch_disk(self):
         """File → Change Scratch Disk — pick a new scratch location mid-session."""

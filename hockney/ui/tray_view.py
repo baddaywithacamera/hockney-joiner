@@ -27,6 +27,12 @@ Z-order pile controls:
   Up arrow + click      Move clicked image up one step in pile
   Down arrow + click    Move clicked image down one step in pile
 
+Deal Mode (shoot replay):
+  D                     Enter deal mode — hide all, reveal one by one
+  Spacebar (1st)        Show next photo in corner preview with EXIF
+  Spacebar (2nd)        Send it to its calculated position on the table
+  ESC                   Exit deal mode, reveal all remaining images
+
 Philosophy: misalignment is valid creative output, not an error to fix.
 """
 
@@ -35,12 +41,14 @@ from __future__ import annotations
 import logging
 import math
 from collections import deque
+from enum import Enum, auto
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal
+from PyQt6.QtCore import Qt, QRectF, QPropertyAnimation, QPointF, QEasingCurve, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
+    QFont,
     QImage,
     QKeyEvent,
     QPainter,
@@ -49,11 +57,17 @@ from PyQt6.QtGui import (
     QWheelEvent,
 )
 from PyQt6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QGraphicsItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
+    QLabel,
+    QLineEdit,
     QMenu,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -75,6 +89,173 @@ THUMB_LONG_EDGE = 300   # must match image_store.THUMB_LONG_EDGE
 
 # ImagePlacement and PlacementSnapshot are defined in hockney.core.models
 # and imported above — do not redefine them here.
+
+
+class DealState(Enum):
+    """State machine for Deal Mode's two-tap spacebar flow."""
+    IDLE = auto()               # not in deal mode
+    WAITING_PREVIEW = auto()    # ready for first tap — will show preview
+    SHOWING_PREVIEW = auto()    # preview visible, waiting for second tap to place
+
+
+class DealOverlay(QWidget):
+    """
+    Fixed overlay in the lower-right corner of the viewport showing the
+    current photo preview plus EXIF info during Deal Mode.
+    """
+
+    PREVIEW_SIZE = 220  # max dimension for the corner thumbnail
+    MARGIN = 16
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setFixedWidth(260)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        self._progress_label = QLabel()
+        self._progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._progress_label.setStyleSheet(
+            "color: #ccc; font-size: 13px; font-weight: bold;"
+        )
+        layout.addWidget(self._progress_label)
+
+        self._image_label = QLabel()
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_label.setFixedSize(self.PREVIEW_SIZE + 8, self.PREVIEW_SIZE + 8)
+        self._image_label.setStyleSheet(
+            "background: #1a1a1a; border: 2px solid #555; border-radius: 4px;"
+        )
+        layout.addWidget(self._image_label, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        self._exif_label = QLabel()
+        self._exif_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._exif_label.setWordWrap(True)
+        self._exif_label.setStyleSheet(
+            "color: #aaa; font-size: 11px; font-family: monospace;"
+        )
+        layout.addWidget(self._exif_label)
+
+        self._filename_label = QLabel()
+        self._filename_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._filename_label.setStyleSheet(
+            "color: #888; font-size: 10px;"
+        )
+        layout.addWidget(self._filename_label)
+
+        self.setStyleSheet(
+            "DealOverlay { background: rgba(20, 20, 20, 200); "
+            "border: 1px solid #444; border-radius: 6px; }"
+        )
+        self.adjustSize()
+        self.hide()
+
+    def show_photo(self, pixmap: QPixmap, exif: dict, filename: str,
+                   current: int, total: int):
+        """Update the overlay with a new photo."""
+        self._progress_label.setText(f"{current} / {total}")
+
+        # Scale pixmap to fit preview area
+        scaled = pixmap.scaled(
+            self.PREVIEW_SIZE, self.PREVIEW_SIZE,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._image_label.setPixmap(scaled)
+
+        # EXIF line
+        parts = []
+        if "shutter" in exif:
+            parts.append(exif["shutter"])
+        if "aperture" in exif:
+            parts.append(exif["aperture"])
+        if "iso" in exif:
+            parts.append(exif["iso"])
+        if "focal_length" in exif:
+            parts.append(exif["focal_length"])
+        self._exif_label.setText("  |  ".join(parts) if parts else "")
+        self._exif_label.setVisible(bool(parts))
+
+        self._filename_label.setText(filename)
+
+        self.adjustSize()
+        self.show()
+        self._reposition()
+
+    def _reposition(self):
+        """Anchor to the lower-right of the parent viewport."""
+        if self.parent():
+            p = self.parent()
+            x = p.width() - self.width() - self.MARGIN
+            y = p.height() - self.height() - self.MARGIN
+            self.move(max(0, x), max(0, y))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reposition()
+
+class DealModeDialog(QDialog):
+    """
+    Optional dialog shown when entering Deal Mode.  Lets the user type in
+    batch shooting info (shutter, aperture, ISO) that overrides / supplements
+    per-file EXIF for the whole set.  All fields are optional — leave blank
+    to use whatever EXIF the file contains.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Deal Mode — Batch Info")
+        self.setMinimumWidth(320)
+
+        layout = QVBoxLayout(self)
+
+        hint = QLabel(
+            "Optional: enter shooting info for the whole batch.\n"
+            "Leave fields blank to use per-file EXIF (if available)."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #aaa; margin-bottom: 8px;")
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        self.shutter_edit = QLineEdit()
+        self.shutter_edit.setPlaceholderText("e.g. 1/125s")
+        form.addRow("Shutter:", self.shutter_edit)
+
+        self.aperture_edit = QLineEdit()
+        self.aperture_edit.setPlaceholderText("e.g. f/8")
+        form.addRow("Aperture:", self.aperture_edit)
+
+        self.iso_edit = QLineEdit()
+        self.iso_edit.setPlaceholderText("e.g. ISO 400")
+        form.addRow("ISO:", self.iso_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_overrides(self) -> dict[str, str]:
+        """Return a dict of non-empty override values."""
+        result: dict[str, str] = {}
+        s = self.shutter_edit.text().strip()
+        if s:
+            result["shutter"] = s
+        a = self.aperture_edit.text().strip()
+        if a:
+            result["aperture"] = a
+        i = self.iso_edit.text().strip()
+        if i:
+            result["iso"] = i
+        return result
+
 
 # ── Undo/redo ──────────────────────────────────────────────────────────────────
 
@@ -146,6 +327,7 @@ class TrayView(QGraphicsView):
     """Central canvas — the primary work surface."""
 
     image_activated = pyqtSignal(str)   # image_id of newly active image
+    deal_mode_changed = pyqtSignal(bool)  # True when entering, False when exiting
 
     def __init__(self, store: ImageStore, parent: QWidget | None = None):
         super().__init__(parent)
@@ -165,6 +347,14 @@ class TrayView(QGraphicsView):
         self._pile_highlighted_ids: set[str] = set()   # Ctrl-hover pile
 
         self.setMouseTracking(True)    # needed for Ctrl+hover pile highlight
+
+        # ── Deal Mode state ──────────────────────────────────────────
+        self._deal_state = DealState.IDLE
+        self._deal_queue: list[str] = []       # image_ids sorted by filename
+        self._deal_index: int = 0              # next image to deal
+        self._deal_overlay = DealOverlay(self.viewport())
+        self._deal_visible_ids: set[str] = set()  # images already dealt onto table
+        self._deal_exif_override: dict[str, str] = {}  # batch override for EXIF
 
         self._configure_view()
 
@@ -342,6 +532,24 @@ class TrayView(QGraphicsView):
         if self._highlighted_ids:
             self.clear_highlight()
 
+        # ── Deal Mode keys ────────────────────────────────────────
+        if self.in_deal_mode:
+            if key == Qt.Key.Key_Space:
+                self._deal_spacebar()
+                return
+            if key == Qt.Key.Key_Escape:
+                self.exit_deal_mode()
+                return
+            # Allow adjustment keys (arrows, Z, X) while in deal mode
+            # so user can nudge/z-order the just-placed image before
+            # dealing the next one.  Fall through to normal handling.
+
+        # D to enter deal mode (only when not already in it)
+        if key == Qt.Key.Key_D and not self.in_deal_mode:
+            if self._items:
+                self.enter_deal_mode()
+            return
+
         # G and F work without an active image
         if key == Qt.Key.Key_G:
             self.toggle_grid()
@@ -458,6 +666,187 @@ class TrayView(QGraphicsView):
         while y < rect.bottom():
             painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
             y += GRID_SPACING
+
+    # ── Deal Mode ──────────────────────────────────────────────────────────────
+
+    def enter_deal_mode(self):
+        """
+        Enter Deal Mode: hide all images, prepare a filename-sorted queue,
+        and wait for spacebar taps to reveal them one by one.
+        """
+        records = self.store.all_records()
+        if not records:
+            return
+
+        # Show batch-info dialog (Cancel aborts entry)
+        dlg = DealModeDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._deal_exif_override = dlg.get_overrides()
+
+        # Sort by filename (cameras number sequentially)
+        records_sorted = sorted(records, key=lambda r: r.source_path.name.lower())
+        self._deal_queue = [r.id for r in records_sorted
+                            if r.id not in self._removed_ids]
+
+        if not self._deal_queue:
+            return
+
+        self._deal_index = 0
+        self._deal_visible_ids.clear()
+        self._deal_state = DealState.WAITING_PREVIEW
+
+        # Hide all images on the canvas
+        for item in self._items.values():
+            item.setVisible(False)
+            item.setOpacity(1.0)
+
+        self._deal_overlay._reposition()
+        self._deal_overlay._progress_label.setText(
+            f"0 / {len(self._deal_queue)}"
+        )
+        self._deal_overlay.show()
+
+        self.deal_mode_changed.emit(True)
+        self._update_status_for_deal()
+        log.info("Deal Mode entered: %d images queued", len(self._deal_queue))
+
+    def exit_deal_mode(self):
+        """Exit Deal Mode: reveal any remaining undealt images."""
+        if self._deal_state == DealState.IDLE:
+            return
+
+        self._deal_state = DealState.IDLE
+        self._deal_overlay.hide()
+
+        # Show all non-removed images
+        for iid, item in self._items.items():
+            if iid not in self._removed_ids:
+                item.setVisible(True)
+                item.setOpacity(1.0)
+
+        self._deal_visible_ids.clear()
+        self._deal_queue.clear()
+        self._deal_index = 0
+
+        self.deal_mode_changed.emit(False)
+        log.info("Deal Mode exited")
+
+    @property
+    def in_deal_mode(self) -> bool:
+        return self._deal_state != DealState.IDLE
+
+    def _deal_spacebar(self):
+        """Handle spacebar press during Deal Mode."""
+        if self._deal_state == DealState.WAITING_PREVIEW:
+            # First tap: show next photo in corner preview
+            if self._deal_index >= len(self._deal_queue):
+                # All images dealt — exit deal mode
+                self.exit_deal_mode()
+                return
+
+            image_id = self._deal_queue[self._deal_index]
+            record = self.store.get_record(image_id)
+            if record is None:
+                self._deal_index += 1
+                self._deal_spacebar()  # skip missing, try next
+                return
+
+            # Get thumbnail pixmap for preview
+            arr = self.store.get_thumbnail(image_id)
+            if arr is not None:
+                pixmap = _numpy_to_pixmap(arr)
+            else:
+                pixmap = QPixmap(100, 100)
+                pixmap.fill(QColor(60, 60, 60))
+
+            # Read EXIF from source file, then apply batch overrides
+            from hockney.core.image_store import get_exif_info
+            exif = get_exif_info(record.source_path)
+            # Batch overrides win over per-file EXIF
+            exif.update(self._deal_exif_override)
+
+            self._deal_overlay.show_photo(
+                pixmap, exif, record.source_path.name,
+                self._deal_index + 1, len(self._deal_queue),
+            )
+            self._deal_state = DealState.SHOWING_PREVIEW
+
+        elif self._deal_state == DealState.SHOWING_PREVIEW:
+            # Second tap: place photo on the table at its calculated position
+            image_id = self._deal_queue[self._deal_index]
+            item = self._items.get(image_id)
+            if item:
+                item.setVisible(True)
+                item.setOpacity(1.0)
+                self._deal_visible_ids.add(image_id)
+
+                # Animate from bottom-right area to target position
+                target = QPointF(item.placement.x, item.placement.y)
+                # Start position: offset toward bottom-right of current view
+                view_br = self.mapToScene(
+                    self.viewport().width() - 50,
+                    self.viewport().height() - 50,
+                )
+                self._animate_item_to(item, view_br, target)
+
+                # Activate the just-placed image so user can adjust
+                self._activate(image_id)
+
+            self._deal_index += 1
+            self._deal_state = DealState.WAITING_PREVIEW
+            self._update_status_for_deal()
+
+            # Update overlay progress (but keep it visible for reference)
+            if self._deal_index >= len(self._deal_queue):
+                self._deal_overlay._progress_label.setText(
+                    f"{len(self._deal_queue)} / {len(self._deal_queue)} — done!"
+                )
+            else:
+                self._deal_overlay._progress_label.setText(
+                    f"{self._deal_index} / {len(self._deal_queue)}"
+                )
+
+    def _animate_item_to(self, item: PhotoItem, start: QPointF, end: QPointF,
+                         duration_ms: int = 350):
+        """
+        Smoothly move item from start to end using a QTimer-based tween.
+        QGraphicsPixmapItem doesn't inherit QObject so we can't use
+        QPropertyAnimation directly.
+        """
+        from PyQt6.QtCore import QTimer
+
+        steps = max(1, duration_ms // 16)  # ~60fps
+        step_count = [0]
+        item.setPos(start)
+
+        def _step():
+            step_count[0] += 1
+            t = min(1.0, step_count[0] / steps)
+            # ease-out cubic
+            t_ease = 1.0 - (1.0 - t) ** 3
+            x = start.x() + (end.x() - start.x()) * t_ease
+            y = start.y() + (end.y() - start.y()) * t_ease
+            item.setPos(x, y)
+            if t >= 1.0:
+                timer.stop()
+                item.setPos(end)
+
+        timer = QTimer(self)
+        timer.setInterval(16)
+        timer.timeout.connect(_step)
+        timer.start()
+        # prevent GC
+        self._deal_anim_timer = timer
+
+    def _update_status_for_deal(self):
+        """Update status bar text during deal mode."""
+        total = len(self._deal_queue)
+        placed = self._deal_index
+        if placed < total:
+            log.info("Deal Mode: %d / %d placed — spacebar for next", placed, total)
+        else:
+            log.info("Deal Mode: all %d images placed", total)
 
     # ── Pile (z-order clump) helpers ──────────────────────────────────────────
 
@@ -654,6 +1043,12 @@ class TrayView(QGraphicsView):
         if event.key() == Qt.Key.Key_Control:
             self._clear_pile_highlight()
         super().keyReleaseEvent(event)
+
+    def resizeEvent(self, event):
+        """Reposition deal overlay when viewport resizes."""
+        super().resizeEvent(event)
+        if self.in_deal_mode:
+            self._deal_overlay._reposition()
 
     # ── Snapshots ──────────────────────────────────────────────────────────────
 
