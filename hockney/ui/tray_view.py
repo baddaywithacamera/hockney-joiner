@@ -20,6 +20,13 @@ Mouse:
   Click image           Activate (keyboard controls apply to it)
   Click empty canvas    Deactivate
 
+Z-order pile controls:
+  Ctrl + hover          Highlight the pile of images under the cursor
+  Ctrl + click          Cycle the pile — shuffle top to bottom to expose buried images
+  Right-click image     Context menu: "Bring Forward" / "Send Backward"
+  Up arrow + click      Move clicked image up one step in pile
+  Down arrow + click    Move clicked image down one step in pile
+
 Philosophy: misalignment is valid creative output, not an error to fix.
 """
 
@@ -46,6 +53,7 @@ from PyQt6.QtWidgets import (
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
+    QMenu,
     QWidget,
 )
 
@@ -152,8 +160,11 @@ class TrayView(QGraphicsView):
         self._grid_visible = False
         self._removed_ids: set[str] = set()
         self._commands = CommandStack()
-        self._highlighted_ids: set[str] = set()   # moondream-flagged images
+        self._highlighted_ids: set[str] = set()   # AI-flagged images
         self._highlight_timer = None
+        self._pile_highlighted_ids: set[str] = set()   # Ctrl-hover pile
+
+        self.setMouseTracking(True)    # needed for Ctrl+hover pile highlight
 
         self._configure_view()
 
@@ -448,6 +459,100 @@ class TrayView(QGraphicsView):
             painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
             y += GRID_SPACING
 
+    # ── Pile (z-order clump) helpers ──────────────────────────────────────────
+
+    def _items_at_pos(self, view_pos) -> list[PhotoItem]:
+        """Return all PhotoItems under a viewport position, sorted by z_order."""
+        scene_pos = self.mapToScene(view_pos)
+        items = self._scene.items(scene_pos)
+        pile = [i for i in items if isinstance(i, PhotoItem)]
+        pile.sort(key=lambda i: i.placement.z_order)
+        return pile
+
+    def _highlight_pile(self, pile: list[PhotoItem]):
+        """Dim everything except the pile; clear if pile is empty."""
+        old = self._pile_highlighted_ids
+        self._pile_highlighted_ids = {i.image_id for i in pile}
+        if self._pile_highlighted_ids == old:
+            return  # no change
+        if not self._pile_highlighted_ids:
+            # Restore normal opacity (respect active image dimming)
+            if self._active_id:
+                self._activate(self._active_id)
+            else:
+                self._deactivate_all()
+            return
+        for iid, item in self._items.items():
+            item.setOpacity(1.0 if iid in self._pile_highlighted_ids else 0.25)
+
+    def _clear_pile_highlight(self):
+        if self._pile_highlighted_ids:
+            self._pile_highlighted_ids.clear()
+            if self._active_id:
+                self._activate(self._active_id)
+            else:
+                self._deactivate_all()
+
+    def _cycle_pile(self, pile: list[PhotoItem]):
+        """
+        Shuffle the pile: take the topmost image and send it to the bottom
+        of the pile, exposing the next one. All z_orders within the pile
+        rotate down by one step.
+        """
+        if len(pile) < 2:
+            return
+        snap_before = [self._snapshot_one(i.image_id) for i in pile]
+
+        # Collect the current z_orders and rotate them
+        z_values = [i.placement.z_order for i in pile]
+        # Move top to bottom: [1,2,3] → [3,1,2] (highest z goes to lowest)
+        rotated = [z_values[-1]] + z_values[:-1]
+        # Swap: bottom gets top's z, everyone else shifts down
+        rotated = z_values[1:] + [z_values[0]]
+
+        for item, new_z in zip(pile, rotated):
+            item.placement.z_order = new_z
+            item._apply_placement()
+
+        self._commands.push(snap_before)
+
+    def _move_in_pile(self, item: PhotoItem, direction: int):
+        """
+        Move item up (+1) or down (-1) in the z-order relative to its
+        immediate neighbours in the pile at its position.
+        """
+        scene_pos = item.mapToScene(item.boundingRect().center())
+        all_here = self._scene.items(scene_pos)
+        pile = sorted(
+            [i for i in all_here if isinstance(i, PhotoItem)],
+            key=lambda i: i.placement.z_order,
+        )
+        if len(pile) < 2:
+            return
+
+        idx = next((j for j, p in enumerate(pile) if p.image_id == item.image_id), None)
+        if idx is None:
+            return
+
+        swap_idx = idx + direction
+        if swap_idx < 0 or swap_idx >= len(pile):
+            return
+
+        snap_before = [self._snapshot_one(pile[idx].image_id),
+                       self._snapshot_one(pile[swap_idx].image_id)]
+
+        # Swap z_orders
+        z_a = pile[idx].placement.z_order
+        z_b = pile[swap_idx].placement.z_order
+        if z_a == z_b:
+            z_b += direction  # break tie
+        pile[idx].placement.z_order = z_b
+        pile[swap_idx].placement.z_order = z_a
+        pile[idx]._apply_placement()
+        pile[swap_idx]._apply_placement()
+
+        self._commands.push(snap_before)
+
     # ── Mouse ──────────────────────────────────────────────────────────────────
 
     def wheelEvent(self, event: QWheelEvent):
@@ -465,21 +570,90 @@ class TrayView(QGraphicsView):
                 return True
         return super().event(event)
 
+    def mouseMoveEvent(self, event):
+        """Ctrl+hover: highlight the pile of images under the cursor."""
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            pile = self._items_at_pos(event.pos())
+            self._highlight_pile(pile)
+        elif self._pile_highlighted_ids:
+            self._clear_pile_highlight()
+        super().mouseMoveEvent(event)
+
     def mousePressEvent(self, event):
+        mod = event.modifiers()
+
         if event.button() == Qt.MouseButton.MiddleButton:
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            super().mousePressEvent(event)
+            return
+
+        item = self.itemAt(event.pos())
+
+        # Ctrl+click: cycle the pile under cursor
+        if (event.button() == Qt.MouseButton.LeftButton
+                and mod & Qt.KeyboardModifier.ControlModifier):
+            pile = self._items_at_pos(event.pos())
+            self._cycle_pile(pile)
+            return
+
+        # Up/Down arrow held + click: move image in pile
+        from PyQt6.QtWidgets import QApplication
+        keys = QApplication.queryKeyboardModifiers()
+        # (Arrow keys aren't modifiers, so we check via key state in keyPressEvent instead —
+        #  handled below in the right-click context menu and Z/X keys)
+
+        if isinstance(item, PhotoItem):
+            self._activate(item.image_id)
         else:
-            item = self.itemAt(event.pos())
-            if isinstance(item, PhotoItem):
-                self._activate(item.image_id)
-            else:
-                self._deactivate_all()
+            self._deactivate_all()
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        """Right-click context menu for z-order control."""
+        item = self.itemAt(event.pos())
+        if not isinstance(item, PhotoItem):
+            super().contextMenuEvent(event)
+            return
+
+        self._activate(item.image_id)
+
+        menu = QMenu(self)
+        bring_fwd = menu.addAction("Bring Forward  (X)")
+        send_back = menu.addAction("Send Backward  (Z)")
+        menu.addSeparator()
+        bring_top = menu.addAction("Bring to Front")
+        send_bottom = menu.addAction("Send to Back")
+
+        action = menu.exec(event.globalPos())
+        if action is None:
+            return
+
+        snap_before = self._snapshot_one(item.image_id)
+        if action == bring_fwd:
+            self._move_in_pile(item, +1)
+        elif action == send_back:
+            self._move_in_pile(item, -1)
+        elif action == bring_top:
+            max_z = max(p.z_order for p in self._placements.values()) + 1
+            item.placement.z_order = max_z
+            item._apply_placement()
+            self._commands.push([snap_before])
+        elif action == send_bottom:
+            min_z = min(p.z_order for p in self._placements.values()) - 1
+            item.placement.z_order = min_z
+            item._apply_placement()
+            self._commands.push([snap_before])
+
+    def keyReleaseEvent(self, event):
+        """Clear pile highlight when Ctrl is released."""
+        if event.key() == Qt.Key.Key_Control:
+            self._clear_pile_highlight()
+        super().keyReleaseEvent(event)
 
     # ── Snapshots ──────────────────────────────────────────────────────────────
 
