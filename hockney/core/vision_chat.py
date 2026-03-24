@@ -29,7 +29,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 log = logging.getLogger(__name__)
 
-VQA_MODEL_ID = "Salesforce/blip-vqa-large"
+VQA_MODEL_ID = "Salesforce/blip-vqa-capfilt-large"
 READY_MARKER = "vision_ready"
 
 
