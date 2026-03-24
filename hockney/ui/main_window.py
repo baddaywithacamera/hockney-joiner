@@ -20,6 +20,7 @@ Drag-and-drop a folder or image files anywhere onto the window to load.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
@@ -62,6 +63,7 @@ class MainWindow(QMainWindow):
         self.model_ready = model_ready
 
         self.store = ImageStore(session)
+        self._status_history: deque[str] = deque(maxlen=4)
 
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1400, 900)
@@ -178,6 +180,13 @@ class MainWindow(QMainWindow):
         export_action.setShortcut(QKeySequence("Ctrl+E"))
         export_action.triggered.connect(self.export)
         file_menu.addAction(export_action)
+
+        file_menu.addSeparator()
+
+        clear_action = QAction("&Clear Composition", self)
+        clear_action.setToolTip("Remove all images from the canvas and start fresh")
+        clear_action.triggered.connect(self._clear_composition)
+        file_menu.addAction(clear_action)
 
         file_menu.addSeparator()
 
@@ -383,11 +392,14 @@ class MainWindow(QMainWindow):
         self.process_btn.setEnabled(False)
 
         worker = PlacementWorker(self.store, self.model_ready, self.models_dir)
-        progress = QProgressDialog("Computing placements…", None, 0, 100, self)
+        progress = QProgressDialog("Computing placements…", "Cancel", 0, 100, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setWindowTitle("Auto-Place")
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
         progress.show()
 
+        progress.canceled.connect(worker.cancel)
         worker.progress.connect(progress.setValue)
         worker.finished.connect(lambda result: self._on_placement_finished(result, progress))
         worker.error.connect(lambda msg: self._on_placement_error(msg, progress))
@@ -396,6 +408,10 @@ class MainWindow(QMainWindow):
 
     def _on_placement_finished(self, result, progress: QProgressDialog):
         progress.close()
+        if self._placement_worker and self._placement_worker._cancelled:
+            self.process_btn.setEnabled(True)
+            self._update_status("Placement cancelled.")
+            return
         self.tray_view.set_placements(result.placements)
         self.tray_view.fit_all()
         self.process_btn.setEnabled(True)
@@ -593,6 +609,35 @@ class MainWindow(QMainWindow):
         if not active:
             self._update_status("Deal Mode exited.")
 
+    def _clear_composition(self):
+        """File → Clear Composition — dump everything and start fresh."""
+        if self.store.count() == 0:
+            return
+        result = QMessageBox.question(
+            self,
+            "Clear Composition",
+            f"Remove all {self.store.count()} images from the canvas?\n\n"
+            "This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+
+        # Exit deal mode if active
+        if self.tray_view.in_deal_mode:
+            self.tray_view.exit_deal_mode()
+
+        self.tray_view._scene.clear()
+        self.tray_view._items.clear()
+        self.tray_view._placements.clear()
+        self.tray_view._removed_ids.clear()
+        self.tray_view._active_id = None
+        self.tray_view._commands = type(self.tray_view._commands)()  # fresh CommandStack
+        self.store.clear()
+        self.sidebar.refresh()
+        self.process_btn.setEnabled(False)
+        self._update_status("Composition cleared.")
+
     def _change_scratch_disk(self):
         """File → Change Scratch Disk — pick a new scratch location mid-session."""
         from hockney.main import ScratchDiskDialog
@@ -641,7 +686,9 @@ class MainWindow(QMainWindow):
             self._chat_dock.setVisible(True)
 
     def _update_status(self, msg: str):
-        self.status_bar.showMessage(msg)
+        self._status_history.append(msg)
+        display = "  ·  ".join(self._status_history)
+        self.status_bar.showMessage(display)
         log.info(msg)
 
     def closeEvent(self, event):

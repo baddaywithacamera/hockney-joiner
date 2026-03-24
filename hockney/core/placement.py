@@ -57,6 +57,10 @@ class PlacementWorker(QThread):
         self.store = store
         self.model_ready = model_ready
         self.models_dir = models_dir
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
         records = self.store.all_records()
@@ -69,7 +73,8 @@ class PlacementWorker(QThread):
         else:
             result = self._place_grid(records)
 
-        self.finished.emit(result)
+        if not self._cancelled:
+            self.finished.emit(result)
 
     # ── Grid placement ─────────────────────────────────────────────────────────
 
@@ -126,6 +131,8 @@ class PlacementWorker(QThread):
         features = {}   # record.id → lightglue feature dict
 
         for i, record in enumerate(records):
+            if self._cancelled:
+                return self._place_grid(records)
             arr = self.store.get_thumbnail(record.id)   # 300px numpy HxWx3
             if arr is None:
                 continue
@@ -144,6 +151,8 @@ class PlacementWorker(QThread):
         pair_idx = 0
 
         for i in range(n_ids):
+            if self._cancelled:
+                return self._place_grid(records)
             for j in range(i + 1, n_ids):
                 id_a, id_b = ids[i], ids[j]
                 try:
