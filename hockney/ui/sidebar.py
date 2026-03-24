@@ -117,6 +117,26 @@ class Sidebar(QWidget):
         }
         self.process_requested.emit(settings)
 
+    def get_processing_settings(self) -> dict:
+        return {
+            "histogram_eq": self.eq_checkbox.isChecked(),
+            "filter": self.filter_combo.currentText(),
+            "surface_effect": self.surface_combo.currentText(),
+            "surface_intensity": self.intensity_slider.value(),
+        }
+
+    def apply_processing_settings(self, settings: dict):
+        self.eq_checkbox.setChecked(settings.get("histogram_eq", False))
+        f = settings.get("filter", "None")
+        idx = self.filter_combo.findText(f)
+        if idx >= 0:
+            self.filter_combo.setCurrentIndex(idx)
+        s = settings.get("surface_effect", "None")
+        idx = self.surface_combo.findText(s)
+        if idx >= 0:
+            self.surface_combo.setCurrentIndex(idx)
+        self.intensity_slider.setValue(settings.get("surface_intensity", 30))
+
     def set_active_image(self, image_id: str):
         record = self.store.get_record(image_id)
         if record:

@@ -116,14 +116,32 @@ def render_composite(
     placements: list[ImagePlacement],
     store: ImageStore,
     scale: float,
+    processing: dict | None = None,
     progress_cb=None,
 ) -> "Image":
     """
     Render a composite PIL Image from the given placements at the given scale.
     Images are drawn in z_order (lowest first = furthest back).
+    processing: optional dict with histogram_eq, filter, surface_effect keys.
     progress_cb(pct: int) called periodically if provided.
     """
-    from PIL import Image
+    from PIL import Image, ImageOps
+
+    processing = processing or {}
+    do_eq = processing.get("histogram_eq", False)
+    filter_name = processing.get("filter", "None")
+    surface_effect = processing.get("surface_effect", "None")
+    surface_intensity = processing.get("surface_intensity", 0) / 100.0
+
+    if filter_name and filter_name != "None":
+        from hockney.effects.filters import apply_filter as _apply_filter
+    else:
+        _apply_filter = None
+
+    if surface_effect in ("Random Curves", "Combined") and surface_intensity > 0:
+        from hockney.effects.surface import apply_per_tile_warp
+    else:
+        apply_per_tile_warp = None
 
     sorted_placements = sorted(placements, key=lambda p: p.z_order)
     canvas_w, canvas_h, origin_x, origin_y = _canvas_size(placements, store, scale)
@@ -143,6 +161,16 @@ def render_composite(
         if full is None:
             log.warning("Could not load full-res for %s", p.image_id)
             continue
+
+        full = full.convert("RGB")
+
+        # ── Batch processing ───────────────────────────────────────────────────
+        if do_eq:
+            full = ImageOps.equalize(full)
+        if _apply_filter:
+            full = _apply_filter(full, filter_name)
+        if apply_per_tile_warp:
+            full = apply_per_tile_warp(full, p.image_id, surface_intensity)
 
         full = full.convert("RGBA")
 
@@ -195,12 +223,14 @@ class ExportWorker(QThread):
         store: ImageStore,
         output_path: Path,
         scale_mode: ScaleMode = "medium",
+        processing: dict | None = None,
     ):
         super().__init__()
         self.placements = [p for p in placements if p.image_id]
         self.store = store
         self.output_path = output_path
         self.scale_mode = scale_mode
+        self.processing = processing or {}
 
     def run(self):
         try:
@@ -211,8 +241,17 @@ class ExportWorker(QThread):
                 self.placements,
                 self.store,
                 scale,
+                processing=self.processing,
                 progress_cb=self.progress.emit,
             )
+
+            # Apply surface texture effects to finished composite
+            surface_effect = self.processing.get("surface_effect", "None")
+            surface_intensity = self.processing.get("surface_intensity", 0) / 100.0
+            if surface_effect != "None" and surface_intensity > 0:
+                from hockney.effects.surface import apply_surface
+                log.info("Applying surface effect: %s at %.0f%%", surface_effect, surface_intensity * 100)
+                composite = apply_surface(composite, surface_effect, surface_intensity)
 
             self.progress.emit(97)
             self._save(composite)

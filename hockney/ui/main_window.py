@@ -323,19 +323,44 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Project", "", "Hockney Project (*.json)"
         )
-        if path:
-            self.store.load_meta(Path(path))
-            self.tray_view.refresh()
-            self.sidebar.refresh()
-            self._update_status(f"Opened: {Path(path).name}")
+        if not path:
+            return
+
+        from hockney.core.project import load_project
+        result = load_project(Path(path), self.store)
+
+        self.tray_view.refresh()
+        self.tray_view.set_placements(result.placements)
+        self.tray_view._removed_ids = result.removed_ids
+        self.tray_view.fit_all()
+        self.sidebar.refresh()
+        self.sidebar.apply_processing_settings(result.processing)
+        self.process_btn.setEnabled(self.store.count() > 0)
+
+        if result.missing_files:
+            QMessageBox.warning(
+                self, "Missing Files",
+                f"{len(result.missing_files)} source file(s) could not be found "
+                f"and were skipped:\n\n" + "\n".join(result.missing_files[:10]),
+            )
+        self._update_status(f"Opened: {Path(path).name}")
 
     def save_project(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Project", "joiner.json", "Hockney Project (*.json)"
         )
-        if path:
-            self.store.save_meta(Path(path))
-            self._update_status(f"Saved: {Path(path).name}")
+        if not path:
+            return
+
+        from hockney.core.project import save_project
+        save_project(
+            Path(path),
+            store=self.store,
+            placements=self.tray_view.all_placements(),
+            removed_ids=self.tray_view._removed_ids,
+            processing=self.sidebar.get_processing_settings(),
+        )
+        self._update_status(f"Saved: {Path(path).name}")
 
     # ── Export ─────────────────────────────────────────────────────────────────
 
@@ -357,7 +382,8 @@ class MainWindow(QMainWindow):
             return
 
         from hockney.core.export import ExportWorker
-        worker = ExportWorker(placements, self.store, Path(output_path), scale_mode)
+        processing = self.sidebar.get_processing_settings()
+        worker = ExportWorker(placements, self.store, Path(output_path), scale_mode, processing)
 
         progress = QProgressDialog("Rendering composite…", None, 0, 100, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
