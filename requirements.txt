@@ -1,0 +1,22 @@
+# Hockney Joiner Assembly Tool
+# Core requirements
+
+# GUI
+PyQt6>=6.5.0
+
+# Image I/O and processing
+Pillow>=10.0.0
+opencv-python>=4.8.0
+
+# AI feature matching
+torch>=2.0.0           # CPU-only fine; CUDA detected at runtime
+lightglue @ git+https://github.com/cvg/LightGlue.git
+
+# Model delivery
+huggingface_hub>=0.20.0
+
+# RAW support (optional - tool works without this)
+# rawpy>=0.19.0        # Uncomment to enable RAW input
+
+# Utilities
+numpy>=1.24.0

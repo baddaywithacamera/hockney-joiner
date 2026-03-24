@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "hockney-joiner"
+version = "0.1.0"
+description = "AI-assisted Hockney joiner assembly tool"
+authors = [{ name = "Sean McCormick" }]
+license = { text = "GPL-3.0-or-later" }
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["photography", "hockney", "joiner", "composite", "ai"]
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics",
+]
+dependencies = [
+    "PyQt6>=6.5.0",
+    "Pillow>=10.0.0",
+    "opencv-python>=4.8.0",
+    "torch>=2.0.0",
+    "huggingface_hub>=0.20.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+raw = ["rawpy>=0.19.0"]
+dev = ["pytest>=7.0", "pytest-qt>=4.0", "black", "ruff"]
+
+[project.scripts]
+hockney-joiner = "hockney.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hockney*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
