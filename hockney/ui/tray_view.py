@@ -407,6 +407,7 @@ class TrayView(QGraphicsView):
         n = len(records)
         cols = max(1, math.isqrt(n))
         padding = 24
+        tile = self.store.thumb_long_edge
 
         for i, record in enumerate(records):
             col = i % cols
@@ -415,13 +416,13 @@ class TrayView(QGraphicsView):
             # Use actual aspect ratio for spacing
             aspect = record.width / max(record.height, 1)
             if aspect >= 1:
-                tw = THUMB_LONG_EDGE
-                th = int(THUMB_LONG_EDGE / aspect)
+                tw = tile
+                th = int(tile / aspect)
             else:
-                tw = int(THUMB_LONG_EDGE * aspect)
-                th = THUMB_LONG_EDGE
+                tw = int(tile * aspect)
+                th = tile
 
-            x = float(col * (THUMB_LONG_EDGE + padding))
+            x = float(col * (tile + padding))
             y = float(row * (th + padding))
 
             p = self._placements.get(record.id)

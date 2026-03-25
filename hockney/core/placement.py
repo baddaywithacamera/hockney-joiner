@@ -71,6 +71,8 @@ class PlacementWorker(QThread):
         self.config = config
         self._cancelled = False
 
+        self._thumb_edge = store.thumb_long_edge  # tile size for grid layout
+
         # Apply subject-type tuning
         if config and config.subject_type in SUBJECT_TUNING:
             t = SUBJECT_TUNING[config.subject_type]
@@ -111,8 +113,8 @@ class PlacementWorker(QThread):
             col = i % cols
             row = i // cols
             aspect = record.width / max(record.height, 1)
-            th = int(THUMB_LONG_EDGE / aspect) if aspect >= 1 else THUMB_LONG_EDGE
-            x = float(col * (THUMB_LONG_EDGE + GRID_PADDING))
+            th = int(self._thumb_edge / aspect) if aspect >= 1 else self._thumb_edge
+            x = float(col * (self._thumb_edge + GRID_PADDING))
             y = float(row * (th + GRID_PADDING))
             placements.append(ImagePlacement(
                 image_id=record.id,
@@ -253,10 +255,10 @@ class PlacementWorker(QThread):
 
             # Place them below the main composition
             placed_ys = [placements[pid].y for pid in placed]
-            grid_y_start = max(placed_ys) + THUMB_LONG_EDGE + GRID_PADDING * 4
+            grid_y_start = max(placed_ys) + self._thumb_edge + GRID_PADDING * 4
 
             for i, uid in enumerate(sorted(unplaced)):
-                x = float(i * (THUMB_LONG_EDGE + GRID_PADDING))
+                x = float(i * (self._thumb_edge + GRID_PADDING))
                 y = grid_y_start
                 p = ImagePlacement(
                     image_id=uid,
@@ -468,10 +470,10 @@ class PlacementWorker(QThread):
         fallback_count = len(odds_and_ends)
         if odds_and_ends:
             placed_ys = [p.y for p in placements.values()] or [0.0]
-            tray_y = max(placed_ys) + THUMB_LONG_EDGE + GRID_PADDING * 4
+            tray_y = max(placed_ys) + self._thumb_edge + GRID_PADDING * 4
 
             for i, (uid, gx, gy, gr) in enumerate(odds_and_ends):
-                x = float(i * (THUMB_LONG_EDGE + GRID_PADDING))
+                x = float(i * (self._thumb_edge + GRID_PADDING))
                 p = ImagePlacement(
                     image_id=uid,
                     x=x, y=tray_y, rotation=0.0,

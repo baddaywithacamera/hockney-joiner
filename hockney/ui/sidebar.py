@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QPushButton,
@@ -57,6 +58,28 @@ class Sidebar(QWidget):
         self.image_list.setMaximumHeight(200)
         list_layout.addWidget(self.image_list)
         layout.addWidget(list_group)
+
+        # ── Tile size ─────────────────────────────────────────────────────────
+        tile_group = QGroupBox("Tile Size")
+        tile_layout = QVBoxLayout(tile_group)
+        tile_row = QHBoxLayout()
+        self.tile_slider = QSlider(Qt.Orientation.Horizontal)
+        self.tile_slider.setRange(100, 300)
+        self.tile_slider.setSingleStep(50)
+        self.tile_slider.setPageStep(50)
+        self.tile_slider.setValue(300)
+        self.tile_slider.setToolTip(
+            "Thumbnail tile size in pixels. Smaller = less memory for large batches."
+        )
+        self._tile_label = QLabel("300 px")
+        tile_row.addWidget(self.tile_slider)
+        tile_row.addWidget(self._tile_label)
+        tile_layout.addLayout(tile_row)
+        tile_layout.addWidget(QLabel(
+            "Set before loading. Smaller tiles save memory for 500+ image batches."
+        ))
+        self.tile_slider.valueChanged.connect(self._on_tile_size_changed)
+        layout.addWidget(tile_group)
 
         # ── Batch processing ──────────────────────────────────────────────────
         batch_group = QGroupBox("Batch Processing")
@@ -114,6 +137,17 @@ class Sidebar(QWidget):
         self.info_label.setStyleSheet("color: #888; font-size: 10px;")
         layout.addWidget(self.info_label)
 
+    def _on_tile_size_changed(self, value: int):
+        # Snap to nearest 50
+        snapped = round(value / 50) * 50
+        snapped = max(100, min(300, snapped))
+        if snapped != value:
+            self.tile_slider.blockSignals(True)
+            self.tile_slider.setValue(snapped)
+            self.tile_slider.blockSignals(False)
+        self._tile_label.setText(f"{snapped} px")
+        self.store.thumb_long_edge = snapped
+
     def _on_process_clicked(self):
         settings = {
             "histogram_eq": self.eq_checkbox.isChecked(),
@@ -129,6 +163,7 @@ class Sidebar(QWidget):
             "filter": self.filter_combo.currentText(),
             "surface_effect": self.surface_combo.currentText(),
             "surface_intensity": self.intensity_slider.value(),
+            "tile_size": self.tile_slider.value(),
         }
 
     def apply_processing_settings(self, settings: dict):
@@ -142,6 +177,9 @@ class Sidebar(QWidget):
         if idx >= 0:
             self.surface_combo.setCurrentIndex(idx)
         self.intensity_slider.setValue(settings.get("surface_intensity", 30))
+        tile = settings.get("tile_size", 300)
+        self.tile_slider.setValue(tile)
+        self._on_tile_size_changed(tile)
 
     def set_active_image(self, image_id: str):
         record = self.store.get_record(image_id)

@@ -197,6 +197,7 @@ class ImageStore:
         self._records: dict[str, ImageRecord] = {}   # id → record
         self._thumb_cache: dict[str, np.ndarray] = {}  # Tier 1: always populated
         self._preview_lru = LRUImageCache(MEDIUM_RAM_CACHE_SIZE)  # Tier 2: LRU
+        self.thumb_long_edge: int = THUMB_LONG_EDGE   # configurable tile size
 
     # ── Loading ────────────────────────────────────────────────────────────────
 
@@ -248,7 +249,7 @@ class ImageStore:
         preview_path = self.session.preview_path_for(image_id)
 
         # Generate and save thumbnails to scratch disk
-        thumb_pil = _resize_long_edge(pil_full, THUMB_LONG_EDGE)
+        thumb_pil = _resize_long_edge(pil_full, self.thumb_long_edge)
         thumb_pil.save(thumb_path, format="JPEG", quality=85, optimize=True)
 
         preview_pil = _resize_long_edge(pil_full, PREVIEW_LONG_EDGE)

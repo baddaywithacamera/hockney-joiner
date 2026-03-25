@@ -23,9 +23,35 @@ is empty — LightGlue and Moondream are downloaded on first run.
 - To add an app icon, put `icon.ico` in the project root and update the spec
 
 ### Linux notes
-- Build on Linux for a Linux binary
+
+**System dependencies** (needed for PyQt6 and OpenCV):
+
+```bash
+# Ubuntu / Debian
+sudo apt install python3-dev python3-venv libxcb-cursor0 libgl1 libegl1
+
+# Fedora
+sudo dnf install python3-devel mesa-libGL mesa-libEGL xcb-util-cursor
+
+# Arch
+sudo pacman -S python mesa xcb-util-cursor
+```
+
+**Running from source on Linux:**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m hockney
+```
+
+**Building a standalone binary:**
+
+- Build on Linux for a Linux binary (PyInstaller does not cross-compile)
 - May need `--hidden-import` additions for some distros
-- `upx` compression is optional — remove if UPX is not installed
+- `upx` compression is optional — remove from the spec if UPX is not installed
+- RAW camera support: `pip install rawpy` (optional, needs libraw-dev on Debian/Ubuntu)
 
 ## Adding an app icon
 
