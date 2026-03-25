@@ -132,7 +132,7 @@ class MainWindow(QMainWindow):
         # ── Restore saved dock/window layout ──────────────────────────────────
         # Version-stamped so stale layouts from before the dock migration
         # are silently discarded rather than corrupting the toolbar position.
-        _LAYOUT_VERSION = 2
+        _LAYOUT_VERSION = 3
         from PyQt6.QtCore import QSettings
         settings = QSettings("HockneyJoiner", "Hockney Joiner")
         if settings.value("layout_version", 0, type=int) == _LAYOUT_VERSION:
@@ -777,7 +777,7 @@ class MainWindow(QMainWindow):
         # user left them — including on secondary monitors
         from PyQt6.QtCore import QSettings
         settings = QSettings("HockneyJoiner", "Hockney Joiner")
-        settings.setValue("layout_version", 2)
+        settings.setValue("layout_version", 3)
         settings.setValue("window_geometry", self.saveGeometry())
         settings.setValue("window_state", self.saveState())
         event.accept()
