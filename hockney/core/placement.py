@@ -349,53 +349,52 @@ class PlacementWorker(QThread):
             log.warning("No reference features extracted — falling back to pairwise")
             return self._place_lightglue(records)
 
-        # ── 2. Extract features from detail photos (thumbnails) ──────────────
+        # ── 2. Extract features from detail photos at PREVIEW resolution ─────
+        # CRITICAL: detail and reference must be at the same pixel scale
+        # so keypoint coordinates are in the same coordinate system.
         detail_features = {}
+        detail_sizes = {}   # image_id → (w, h) at preview resolution
 
         for record in records:
             if self._cancelled:
                 return self._place_grid(records)
-            arr = self.store.get_thumbnail(record.id)
-            if arr is None:
-                continue
-            tensor = _arr_to_tensor(arr, device)
-            with torch.no_grad():
-                feats = extractor.extract(tensor)
-            detail_features[record.id] = feats
+            try:
+                # Use medium preview (1500px) instead of thumbnail (300px)
+                # so keypoints match the reference image coordinate system
+                preview_arr = self.store.get_preview(record.id)
+                if preview_arr is None:
+                    # Fall back to thumbnail if preview unavailable
+                    preview_arr = self.store.get_thumbnail(record.id)
+                if preview_arr is None:
+                    continue
+                h_px, w_px = preview_arr.shape[:2]
+                detail_sizes[record.id] = (w_px, h_px)
+                tensor = _arr_to_tensor(preview_arr, device)
+                with torch.no_grad():
+                    feats = extractor.extract(tensor)
+                detail_features[record.id] = feats
+            except Exception as e:
+                log.warning("Failed to extract features from %s: %s", record.id[:6], e)
             done += 1
             self.progress.emit(int(done / total_work * 100))
 
-        # ── 3. Compute reference anchor positions on canvas ──────────────────
-        # References tile based on project type
-        ref_anchors = {}  # slot → (anchor_x, anchor_y)
-        slot_list = list(ref_features.keys())
+        # ── 3. Match each detail against all references, pick best ───────────
+        # The keypoints are all in the same coordinate space (PREVIEW_LONG_EDGE
+        # pixels).  The matched reference keypoints tell us WHERE in the reference
+        # the detail photo appears.  We use the centroid of those reference-side
+        # matches as the placement position, then offset so the detail tile is
+        # centred on that spot.
+        #
+        # Canvas coordinates = reference pixel coordinates (the reference IS
+        # the canvas backdrop, conceptually).
 
-        if self.config.project_type == "perspective":
-            # Standing at origin; Left offset left, Right offset right
-            # Down Low below, Up High above
-            offsets = {
-                "standing": (0, 0),
-                "left": (-1, 0),
-                "right": (1, 0),
-                "down_low": (0, 1),
-                "up_high": (0, -1),
-            }
-            for slot in slot_list:
-                ox, oy = offsets.get(slot, (0, 0))
-                rw, rh = ref_sizes.get(slot, (PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE))
-                ref_anchors[slot] = (ox * rw * 0.5, oy * rh * 0.5)
-        else:
-            # Time of Day / Seasonal: tile left to right
-            x_offset = 0.0
-            for slot in slot_list:
-                rw, rh = ref_sizes.get(slot, (PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE))
-                ref_anchors[slot] = (x_offset, 0.0)
-                x_offset += rw + GRID_PADDING
-
-        # ── 4. Match each detail against all references, pick best ───────────
         placements = {}
         odds_and_ends = []    # (image_id, best_guess_x, best_guess_y, best_guess_rot)
         placed_count = 0
+
+        # Canvas scale factor: we display thumbnails on canvas, but matching
+        # happens at preview resolution.  Convert reference coords → canvas.
+        canvas_scale = self._thumb_edge / PREVIEW_LONG_EDGE
 
         for record in records:
             if self._cancelled:
@@ -409,7 +408,8 @@ class PlacementWorker(QThread):
 
             best_slot = None
             best_inliers = 0
-            best_transform = None
+            best_ref_centroid = None    # centroid of matched keypoints in ref
+            best_rot = 0.0
 
             for slot, ref_feat in ref_features.items():
                 try:
@@ -418,53 +418,83 @@ class PlacementWorker(QThread):
                         "image1": detail_features[record.id],
                     })
                     matches = result["matches"][0]
+                    if len(matches) == 0:
+                        done += 1
+                        self.progress.emit(int(done / total_work * 100))
+                        continue
+
                     kp_ref = ref_feat["keypoints"][0].cpu().numpy()
                     kp_det = detail_features[record.id]["keypoints"][0].cpu().numpy()
                     m_kp_ref = kp_ref[matches[:, 0].cpu().numpy()]
                     m_kp_det = kp_det[matches[:, 1].cpu().numpy()]
 
                     n_inliers = len(m_kp_ref)
-                    if n_inliers > best_inliers:
+                    if n_inliers > best_inliers and n_inliers >= self._min_matches:
+                        # Centroid of matched keypoints on the reference side
+                        # tells us where this detail sits in the reference image
+                        cx = float(m_kp_ref[:, 0].mean())
+                        cy = float(m_kp_ref[:, 1].mean())
+
+                        # Estimate rotation from the transform
                         t = _estimate_transform(m_kp_ref, m_kp_det)
-                        if t is not None:
-                            best_slot = slot
-                            best_inliers = n_inliers
-                            best_transform = t
+                        rot = t[2] if t else 0.0
+
+                        best_slot = slot
+                        best_inliers = n_inliers
+                        best_ref_centroid = (cx, cy)
+                        best_rot = rot
                 except Exception as e:
                     log.debug("Match %s↔%s failed: %s", slot, record.id[:6], e)
 
                 done += 1
                 self.progress.emit(int(done / total_work * 100))
 
-            if best_slot and best_transform and best_inliers >= self._min_matches:
-                tx, ty, rot = best_transform
-                ax, ay = ref_anchors.get(best_slot, (0.0, 0.0))
+            if best_slot and best_ref_centroid:
+                cx, cy = best_ref_centroid
 
-                # Scale transform from reference resolution to thumbnail
-                # resolution since detail features are at 300px but ref is 1500px
-                ref_w, ref_h = ref_sizes.get(best_slot, (PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE))
-                # The transform tx,ty is in reference pixel coords — scale to thumb coords
-                # Detail is at THUMB scale, reference is at PREVIEW scale
-                # We place on canvas using reference coordinate system
-                final_x = ax + tx
-                final_y = ay + ty
+                # The centroid is in reference-image pixel coords.
+                # For perspective projects with multiple refs, offset by
+                # the reference anchor position.
+                if self.config.project_type == "perspective":
+                    offsets = {
+                        "standing": (0, 0),
+                        "left": (-1, 0),
+                        "right": (1, 0),
+                        "down_low": (0, 1),
+                        "up_high": (0, -1),
+                    }
+                    ox, oy = offsets.get(best_slot, (0, 0))
+                    rw, rh = ref_sizes.get(best_slot, (PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE))
+                    cx += ox * rw
+                    cy += oy * rh
+
+                # Scale from reference pixels to canvas (thumbnail) pixels
+                final_x = cx * canvas_scale
+                final_y = cy * canvas_scale
+
+                # Offset so tile is centred on the match point
+                dw, dh = detail_sizes.get(record.id, (self._thumb_edge, self._thumb_edge))
+                tile_w = dw * canvas_scale
+                tile_h = dh * canvas_scale
+                final_x -= tile_w / 2
+                final_y -= tile_h / 2
 
                 p = ImagePlacement(
                     image_id=record.id,
-                    x=final_x, y=final_y, rotation=rot,
+                    x=final_x, y=final_y, rotation=best_rot,
                     z_order=placed_count,
-                    auto_x=final_x, auto_y=final_y, auto_rotation=rot,
+                    auto_x=final_x, auto_y=final_y, auto_rotation=best_rot,
                 )
                 placements[record.id] = p
                 placed_count += 1
             else:
                 # Save best guess even if below threshold — for ghost preview
-                guess_x, guess_y, guess_rot = best_transform if best_transform else (0.0, 0.0, 0.0)
-                if best_slot:
-                    ax, ay = ref_anchors.get(best_slot, (0.0, 0.0))
-                    guess_x += ax
-                    guess_y += ay
-                odds_and_ends.append((record.id, guess_x, guess_y, guess_rot))
+                gx, gy, gr = 0.0, 0.0, 0.0
+                if best_ref_centroid:
+                    gx = best_ref_centroid[0] * canvas_scale
+                    gy = best_ref_centroid[1] * canvas_scale
+                    gr = best_rot
+                odds_and_ends.append((record.id, gx, gy, gr))
 
         # ── 5. Odds & Ends tray — place unmatched below the composition ──────
         fallback_count = len(odds_and_ends)
