@@ -484,9 +484,12 @@ class MainWindow(QMainWindow):
         self._update_status(result.message)
 
         # Auto-enter deal mode after placement so user can review
-        # images one by one and adjust positions
+        # images one by one and adjust positions.
+        # Deferred via QTimer so the progress dialog's focus-restoration
+        # finishes before we grab keyboard focus on the TrayView.
         if result.placements and self.store.count() > 0:
-            self.tray_view.enter_deal_mode(skip_dialog=True)
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(150, lambda: self.tray_view.enter_deal_mode(skip_dialog=True))
 
     def _on_placement_error(self, msg: str, dlg):
         dlg.close()

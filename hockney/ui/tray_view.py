@@ -852,9 +852,20 @@ class TrayView(QGraphicsView):
 
         self.deal_mode_changed.emit(True)
         self._update_status_for_deal()
-        # Grab keyboard focus so spacebar reaches keyPressEvent
+
+        # Aggressively grab keyboard focus so spacebar reaches keyPressEvent.
+        # activateWindow() ensures the parent window is focused first,
+        # then setFocus() puts the keyboard on this view.
+        window = self.window()
+        if window:
+            window.activateWindow()
+            window.raise_()
         self.setFocus(Qt.FocusReason.OtherFocusReason)
         log.info("Deal Mode entered: %d images queued", len(self._deal_queue))
+
+        # Auto-show the first image preview so the user doesn't see
+        # a blank overlay.  First spacebar will PLACE it (not just show it).
+        self._deal_spacebar()
 
     def exit_deal_mode(self):
         """Exit Deal Mode: reveal any remaining undealt images."""
@@ -918,7 +929,7 @@ class TrayView(QGraphicsView):
             self._deal_state = DealState.SHOWING_PREVIEW
 
         elif self._deal_state == DealState.SHOWING_PREVIEW:
-            # Second tap: place photo on the table at its calculated position
+            # Single tap places current photo AND loads the next preview.
             image_id = self._deal_queue[self._deal_index]
             item = self._items.get(image_id)
             if item:
@@ -928,7 +939,6 @@ class TrayView(QGraphicsView):
 
                 # Animate from bottom-right area to target position
                 target = QPointF(item.placement.x, item.placement.y)
-                # Start position: offset toward bottom-right of current view
                 view_br = self.mapToScene(
                     self.viewport().width() - 50,
                     self.viewport().height() - 50,
@@ -939,18 +949,19 @@ class TrayView(QGraphicsView):
                 self._activate(image_id)
 
             self._deal_index += 1
-            self._deal_state = DealState.WAITING_PREVIEW
             self._update_status_for_deal()
 
-            # Update overlay progress (but keep it visible for reference)
+            # Immediately load next preview (or finish)
             if self._deal_index >= len(self._deal_queue):
                 self._deal_overlay._progress_label.setText(
                     f"{len(self._deal_queue)} / {len(self._deal_queue)} — done!"
                 )
+                self._deal_state = DealState.IDLE
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(1500, self.exit_deal_mode)
             else:
-                self._deal_overlay._progress_label.setText(
-                    f"{self._deal_index} / {len(self._deal_queue)}"
-                )
+                self._deal_state = DealState.WAITING_PREVIEW
+                self._deal_spacebar()  # auto-load next preview
 
     def _animate_item_to(self, item: PhotoItem, start: QPointF, end: QPointF,
                          duration_ms: int = 350):
