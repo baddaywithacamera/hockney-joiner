@@ -80,7 +80,7 @@ log = logging.getLogger(__name__)
 
 ROTATE_STEP = 0.5
 ROTATE_FINE = 0.1
-NUDGE_STEP = 1.0
+NUDGE_STEP = 10.0
 GRID_SPACING = 100
 GRID_COLOR = QColor(80, 80, 200, 50)
 ZOOM_FACTOR = 1.15
@@ -297,6 +297,7 @@ class PhotoItem(QGraphicsPixmapItem):
         # Rotate/scale around image centre
         self.setTransformOriginPoint(pixmap.width() / 2, pixmap.height() / 2)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setAcceptHoverEvents(True)
         self._apply_placement()
 
@@ -1001,6 +1002,11 @@ class TrayView(QGraphicsView):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        # After drag-move, write the new position back to the placement
+        if event.button() == Qt.MouseButton.LeftButton:
+            for item in self._scene.selectedItems():
+                if isinstance(item, PhotoItem):
+                    item.read_back_placement()
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event):
