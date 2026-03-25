@@ -181,8 +181,19 @@ class PlacementWorker(QThread):
 
         if engine == "orb":
             return self._place_with_orb(records, plog)
+        elif engine == "akaze":
+            return self._place_with_akaze(records, plog)
+        elif engine == "brisk":
+            return self._place_with_brisk(records, plog)
         elif engine == "sift":
             return self._place_with_sift(records, plog)
+        elif engine == "sift_lightglue":
+            if self.model_ready:
+                return self._place_with_references(records, plog,
+                                                    feature_type="sift_lg")
+            else:
+                log.warning("SIFT+LightGlue requested but model not ready, using SIFT")
+                return self._place_with_sift(records, plog)
         elif engine == "superpoint":
             if self.model_ready:
                 return self._place_with_references(records, plog,
@@ -448,6 +459,90 @@ class PlacementWorker(QThread):
             message=msg,
         )
 
+    def _place_with_akaze(self, records, plog) -> PlacementResult:
+        """Run the AKAZE engine and wrap results into a PlacementResult."""
+        from hockney.core.placement_akaze import place_with_akaze
+
+        placements, odds_and_ends, placed_count, log_data = place_with_akaze(
+            store=self.store, config=self.config, records=records,
+            thumb_edge=self._thumb_edge, min_matches=self._min_matches,
+            min_matches_relaxed=MIN_MATCHES_RELAXED,
+            progress_cb=lambda pct: self.progress.emit(pct),
+            cancel_check=lambda: self._cancelled,
+        )
+        if self._cancelled:
+            return self._place_grid(records)
+        if odds_and_ends:
+            placements, odds_and_ends, placed_count = self._template_fallback(
+                records, placements, odds_and_ends, placed_count)
+        _spread_overlaps(placements, self._thumb_edge, OVERLAP_REPEL, OVERLAP_THRESHOLD)
+        fallback_count = len(odds_and_ends)
+        if odds_and_ends:
+            placed_ys = [p.y for p in placements.values()] or [0.0]
+            tray_y = max(placed_ys) + self._thumb_edge + GRID_PADDING * 4
+            for i, (uid, gx, gy, gr) in enumerate(odds_and_ends):
+                placements[uid] = ImagePlacement(
+                    image_id=uid,
+                    x=float(i * (self._thumb_edge + GRID_PADDING)),
+                    y=tray_y, rotation=0.0, z_order=placed_count + i,
+                    auto_x=gx, auto_y=gy, auto_rotation=gr)
+        self.progress.emit(100)
+        total = len(records)
+        msg = f"AKAZE placed {placed_count}/{total} images."
+        if fallback_count:
+            msg += f" {fallback_count} in Odds & Ends tray."
+        if plog:
+            plog.set_engine("akaze")
+            plog.set_counts(total, placed_count, fallback_count)
+            plog.merge_image_stats(log_data)
+            plog.flush()
+        log.info(msg)
+        return PlacementResult(placements=list(placements.values()),
+                               used_lightglue=False, fallback_count=fallback_count,
+                               message=msg)
+
+    def _place_with_brisk(self, records, plog) -> PlacementResult:
+        """Run the BRISK engine and wrap results into a PlacementResult."""
+        from hockney.core.placement_brisk import place_with_brisk
+
+        placements, odds_and_ends, placed_count, log_data = place_with_brisk(
+            store=self.store, config=self.config, records=records,
+            thumb_edge=self._thumb_edge, min_matches=self._min_matches,
+            min_matches_relaxed=MIN_MATCHES_RELAXED,
+            progress_cb=lambda pct: self.progress.emit(pct),
+            cancel_check=lambda: self._cancelled,
+        )
+        if self._cancelled:
+            return self._place_grid(records)
+        if odds_and_ends:
+            placements, odds_and_ends, placed_count = self._template_fallback(
+                records, placements, odds_and_ends, placed_count)
+        _spread_overlaps(placements, self._thumb_edge, OVERLAP_REPEL, OVERLAP_THRESHOLD)
+        fallback_count = len(odds_and_ends)
+        if odds_and_ends:
+            placed_ys = [p.y for p in placements.values()] or [0.0]
+            tray_y = max(placed_ys) + self._thumb_edge + GRID_PADDING * 4
+            for i, (uid, gx, gy, gr) in enumerate(odds_and_ends):
+                placements[uid] = ImagePlacement(
+                    image_id=uid,
+                    x=float(i * (self._thumb_edge + GRID_PADDING)),
+                    y=tray_y, rotation=0.0, z_order=placed_count + i,
+                    auto_x=gx, auto_y=gy, auto_rotation=gr)
+        self.progress.emit(100)
+        total = len(records)
+        msg = f"BRISK placed {placed_count}/{total} images."
+        if fallback_count:
+            msg += f" {fallback_count} in Odds & Ends tray."
+        if plog:
+            plog.set_engine("brisk")
+            plog.set_counts(total, placed_count, fallback_count)
+            plog.merge_image_stats(log_data)
+            plog.flush()
+        log.info(msg)
+        return PlacementResult(placements=list(placements.values()),
+                               used_lightglue=False, fallback_count=fallback_count,
+                               message=msg)
+
     # ── Grid placement ─────────────────────────────────────────────────────────
 
     def _place_grid(self, records) -> PlacementResult:
@@ -642,7 +737,7 @@ class PlacementWorker(QThread):
         Match each detail photo against reference images (the puzzle box lid).
         Each detail gets an absolute position — no BFS chain, no error accumulation.
 
-        feature_type: "disk", "superpoint", or "aliked" — selects extractor + matcher.
+        feature_type: "disk", "superpoint", "aliked", or "sift_lg" — selects extractor + matcher.
         """
         try:
             import torch
@@ -653,6 +748,8 @@ class PlacementWorker(QThread):
                 from lightglue import SuperPoint
             elif feature_type == "aliked":
                 from lightglue import ALIKED
+            elif feature_type == "sift_lg":
+                from lightglue import SIFT as LG_SIFT
             else:
                 from lightglue import DISK
         except ImportError as e:
@@ -670,6 +767,9 @@ class PlacementWorker(QThread):
         elif feature_type == "aliked":
             extractor = ALIKED(max_num_keypoints=self._max_kp).eval().to(device)
             matcher = LightGlue(features="aliked").eval().to(device)
+        elif feature_type == "sift_lg":
+            extractor = LG_SIFT(max_num_keypoints=self._max_kp).eval().to(device)
+            matcher = LightGlue(features="sift").eval().to(device)
         else:
             extractor = DISK(max_num_keypoints=self._max_kp).eval().to(device)
             matcher = LightGlue(features="disk").eval().to(device)

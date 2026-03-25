@@ -134,19 +134,25 @@ class Sidebar(QWidget):
         self.engine_combo = QComboBox()
         self.engine_combo.addItems([
             "Auto (try all, keep best)",
-            "DISK + LightGlue (GPU)",
-            "SuperPoint + LightGlue (GPU)",
-            "ALIKED + LightGlue (GPU)",
-            "SIFT (CPU)",
-            "ORB (CPU, fast)",
+            "DISK + LightGlue",
+            "SuperPoint + LightGlue",
+            "ALIKED + LightGlue",
+            "SIFT + LightGlue",
+            "SIFT (classic)",
+            "ORB (fast)",
+            "AKAZE (edges)",
+            "BRISK (fastest)",
         ])
         self.engine_combo.setToolTip(
-            "Auto tries each engine and keeps the best result.\n"
+            "Auto tries GPU engines + SIFT, picks best.\n"
             "DISK: learned blob features, good all-rounder.\n"
             "SuperPoint: structural edges and corners.\n"
-            "ALIKED: adaptive descriptors, handles varied textures.\n"
-            "SIFT: classic, scale-invariant, CPU only.\n"
-            "ORB: very fast, good for strong corners/edges."
+            "ALIKED: adaptive descriptors, varied textures.\n"
+            "SIFT+LightGlue: classic features + learned matcher.\n"
+            "SIFT: classic CPU-only, scale-invariant.\n"
+            "ORB: fast CPU, good for strong corners.\n"
+            "AKAZE: nonlinear diffusion, good on blurry images.\n"
+            "BRISK: fastest CPU option."
         )
         engine_layout.addWidget(self.engine_combo)
         layout.addWidget(engine_group)
@@ -190,8 +196,11 @@ class Sidebar(QWidget):
         1: "disk_lightglue",
         2: "superpoint",
         3: "aliked",
-        4: "sift",
-        5: "orb",
+        4: "sift_lightglue",
+        5: "sift",
+        6: "orb",
+        7: "akaze",
+        8: "brisk",
     }
 
     def selected_engine(self) -> str:
