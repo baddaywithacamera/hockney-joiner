@@ -100,6 +100,7 @@ class ProjectConfig:
     project_name: str = "Untitled"
     project_type: str = "perspective"     # perspective / time_of_day / seasonal
     subject_type: str = "landscape"       # landscape / skylife / urban / indoor / people
+    matching_engine: str = "auto"         # auto / disk_lightglue / sift / orb
     references: list[ReferenceImage] = field(default_factory=list)
 
     def slots_for_type(self, include_advanced: bool = False) -> tuple[str, ...]:
@@ -134,6 +135,7 @@ class ProjectConfig:
             "project_name": self.project_name,
             "project_type": self.project_type,
             "subject_type": self.subject_type,
+            "matching_engine": self.matching_engine,
             "references": [r.as_dict() for r in self.references],
         }
 
@@ -143,6 +145,7 @@ class ProjectConfig:
             project_name=d.get("project_name", "Untitled"),
             project_type=d.get("project_type", "perspective"),
             subject_type=d.get("subject_type", "landscape"),
+            matching_engine=d.get("matching_engine", "auto"),
         )
         for rd in d.get("references", []):
             cfg.references.append(ReferenceImage.from_dict(rd))

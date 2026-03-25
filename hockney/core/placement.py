@@ -36,22 +36,25 @@ log = logging.getLogger(__name__)
 THUMB_LONG_EDGE = 300
 PREVIEW_LONG_EDGE = 1500
 GRID_PADDING = 24
-MIN_MATCHES = 12        # minimum inlier keypoint pairs to trust a transform
-MAX_KEYPOINTS = 2048    # per image, for DISK (bumped from 1024 for better ref matching)
+MIN_MATCHES = 8         # minimum RANSAC inlier pairs to trust a placement
+MIN_MATCHES_RELAXED = 5 # second-pass threshold for stragglers
+MAX_KEYPOINTS = 2048    # per image, for DISK
 RANSAC_REPROJ = 5.0     # RANSAC reprojection threshold (px) for reference matching
-OVERLAP_REPEL = 0.3     # fraction of tile size to nudge overlapping tiles apart
+OVERLAP_REPEL = 0.15    # fraction of tile size to nudge overlapping tiles apart
+                        # (lower = tighter shingling, more Hockney-like)
+OVERLAP_THRESHOLD = 0.35  # centres closer than this fraction of tile_size → overlapping
 
 # Subject-type tuning overrides
 SUBJECT_TUNING = {
-    "landscape":  {"max_keypoints": 2048, "min_matches": 10},
-    "skylife":    {"max_keypoints": 1024, "min_matches": 8},
-    "urban":      {"max_keypoints": 2048, "min_matches": 12},
-    "indoor":     {"max_keypoints": 2048, "min_matches": 8},
-    "people":     {"max_keypoints": 2048, "min_matches": 10},
-    "object":     {"max_keypoints": 2048, "min_matches": 8},
-    "vehicle":    {"max_keypoints": 2048, "min_matches": 10},
-    "building":   {"max_keypoints": 2048, "min_matches": 12},
-    "person":     {"max_keypoints": 2048, "min_matches": 10},
+    "landscape":  {"max_keypoints": 2048, "min_matches": 8},
+    "skylife":    {"max_keypoints": 1024, "min_matches": 6},
+    "urban":      {"max_keypoints": 2048, "min_matches": 10},
+    "indoor":     {"max_keypoints": 2048, "min_matches": 6},
+    "people":     {"max_keypoints": 2048, "min_matches": 8},
+    "object":     {"max_keypoints": 2048, "min_matches": 6},
+    "vehicle":    {"max_keypoints": 2048, "min_matches": 8},
+    "building":   {"max_keypoints": 2048, "min_matches": 10},
+    "person":     {"max_keypoints": 2048, "min_matches": 8},
 }
 
 
@@ -97,9 +100,22 @@ class PlacementWorker(QThread):
             self.finished.emit(PlacementResult([], False, 0, "No images to place."))
             return
 
-        # Use reference-based placement if references are loaded
-        if self.config and self.config.has_references() and self.model_ready:
-            result = self._place_with_references(records)
+        # Determine which engine to use
+        engine = "auto"
+        if self.config:
+            engine = getattr(self.config, "matching_engine", "auto") or "auto"
+
+        has_refs = self.config and self.config.has_references()
+
+        # Set up placement logger
+        from hockney.core.placement_log import PlacementLog
+        plog = PlacementLog(
+            self.store.session.session_dir,
+            project_name=self.config.project_name if self.config else "",
+        )
+
+        if has_refs:
+            result = self._place_with_references_dispatched(records, engine, plog)
         elif self.model_ready:
             result = self._place_lightglue(records)
         else:
@@ -107,6 +123,134 @@ class PlacementWorker(QThread):
 
         if not self._cancelled:
             self.finished.emit(result)
+
+    # ── Engine dispatch ──────────────────────────────────────────────────────
+
+    def _place_with_references_dispatched(self, records, engine: str,
+                                           plog) -> PlacementResult:
+        """
+        Dispatch to the right engine for reference-based placement.
+        "auto" tries DISK+LightGlue first; if placement rate < 60%,
+        re-runs with SIFT.  Best result wins.
+        """
+        from hockney.core.placement_log import PlacementLog
+
+        if engine == "sift":
+            return self._place_with_sift(records, plog)
+        elif engine == "disk_lightglue":
+            if self.model_ready:
+                return self._place_with_references(records, plog)
+            else:
+                log.warning("DISK+LightGlue requested but model not ready, using SIFT")
+                return self._place_with_sift(records, plog)
+        else:
+            # "auto" — try both, keep the better result
+            # Try DISK+LightGlue first if model is ready
+            disk_result = None
+            sift_result = None
+
+            if self.model_ready:
+                disk_result = self._place_with_references(records, plog=None)
+                disk_rate = (len(records) - disk_result.fallback_count) / max(len(records), 1)
+                log.info("DISK+LightGlue: %.0f%% placed (%d/%d)",
+                         disk_rate * 100, len(records) - disk_result.fallback_count, len(records))
+
+                if disk_rate >= 0.7:
+                    # Good enough — log and return
+                    plog.set_engine("disk_lightglue")
+                    plog.set_counts(len(records),
+                                    len(records) - disk_result.fallback_count,
+                                    disk_result.fallback_count)
+                    plog.set_notes(f"DISK accepted at {disk_rate*100:.0f}%")
+                    plog.flush()
+                    return disk_result
+
+            # Try SIFT (either as fallback or primary)
+            self.progress.emit(0)  # reset progress for second pass
+            sift_result = self._place_with_sift(records, plog)
+            sift_rate = (len(records) - sift_result.fallback_count) / max(len(records), 1)
+            log.info("SIFT: %.0f%% placed (%d/%d)",
+                     sift_rate * 100, len(records) - sift_result.fallback_count, len(records))
+
+            # Pick the winner
+            if disk_result:
+                disk_rate = (len(records) - disk_result.fallback_count) / max(len(records), 1)
+                if disk_rate >= sift_rate:
+                    plog.set_engine("disk_lightglue (auto-winner)")
+                    plog.set_counts(len(records),
+                                    len(records) - disk_result.fallback_count,
+                                    disk_result.fallback_count)
+                    plog.set_notes(f"DISK won: {disk_rate*100:.0f}% vs SIFT {sift_rate*100:.0f}%")
+                    plog.flush()
+                    return disk_result
+
+            # SIFT won (or DISK wasn't available)
+            return sift_result
+
+    def _place_with_sift(self, records, plog) -> PlacementResult:
+        """Run the SIFT engine and wrap results into a PlacementResult."""
+        from hockney.core.placement_sift import place_with_sift
+
+        placements, odds_and_ends, placed_count, log_data = place_with_sift(
+            store=self.store,
+            config=self.config,
+            records=records,
+            thumb_edge=self._thumb_edge,
+            min_matches=self._min_matches,
+            min_matches_relaxed=MIN_MATCHES_RELAXED,
+            progress_cb=lambda pct: self.progress.emit(pct),
+            cancel_check=lambda: self._cancelled,
+        )
+
+        if self._cancelled:
+            return self._place_grid(records)
+
+        # Template matching fallback for remaining unplaced
+        if odds_and_ends:
+            placements, odds_and_ends, placed_count = self._template_fallback(
+                records, placements, odds_and_ends, placed_count,
+            )
+
+        # Spread overlaps
+        _spread_overlaps(placements, self._thumb_edge, OVERLAP_REPEL, OVERLAP_THRESHOLD)
+
+        # Odds & Ends tray
+        fallback_count = len(odds_and_ends)
+        if odds_and_ends:
+            placed_ys = [p.y for p in placements.values()] or [0.0]
+            tray_y = max(placed_ys) + self._thumb_edge + GRID_PADDING * 4
+            for i, (uid, gx, gy, gr) in enumerate(odds_and_ends):
+                p = ImagePlacement(
+                    image_id=uid,
+                    x=float(i * (self._thumb_edge + GRID_PADDING)),
+                    y=tray_y, rotation=0.0,
+                    z_order=placed_count + i,
+                    auto_x=gx, auto_y=gy, auto_rotation=gr,
+                )
+                placements[uid] = p
+
+        self.progress.emit(100)
+
+        result_list = list(placements.values())
+        total = len(records)
+        msg = f"SIFT placed {placed_count}/{total} images."
+        if fallback_count:
+            msg += f" {fallback_count} in Odds & Ends tray."
+
+        # Log results
+        if plog:
+            plog.set_engine("sift")
+            plog.set_counts(total, placed_count, fallback_count)
+            plog.merge_image_stats(log_data)
+            plog.flush()
+
+        log.info(msg)
+        return PlacementResult(
+            placements=result_list,
+            used_lightglue=False,
+            fallback_count=fallback_count,
+            message=msg,
+        )
 
     # ── Grid placement ─────────────────────────────────────────────────────────
 
@@ -296,7 +440,7 @@ class PlacementWorker(QThread):
 
     # ── Reference-based placement ───────────────────────────────────────────
 
-    def _place_with_references(self, records) -> PlacementResult:
+    def _place_with_references(self, records, plog=None) -> PlacementResult:
         """
         Match each detail photo against reference images (the puzzle box lid).
         Each detail gets an absolute position — no BFS chain, no error accumulation.
@@ -341,6 +485,9 @@ class PlacementWorker(QThread):
                 ref_sizes[ref.slot] = (new_w, new_h)
 
                 arr = np.array(pil)
+                # CLAHE contrast boost before feature extraction
+                from hockney.core.placement_sift import clahe_preprocess
+                arr = clahe_preprocess(arr, clip_limit=3.0)
                 tensor = _arr_to_tensor(arr, device)
                 with torch.no_grad():
                     feats = extractor.extract(tensor)
@@ -385,13 +532,10 @@ class PlacementWorker(QThread):
                 if preview_arr is None:
                     continue
 
-                # Light denoise before feature extraction — helps with soft/noisy
-                # camera images (e.g. Kodak Charmer).  Keep h low (3-4) to
-                # preserve edges that DISK needs.
-                import cv2 as cv2_pre
-                preview_arr = cv2_pre.fastNlMeansDenoisingColored(
-                    preview_arr, None, 3, 3, 7, 21,
-                )
+                # Light denoise + CLAHE contrast boost
+                from hockney.core.placement_sift import clahe_preprocess, light_denoise
+                preview_arr = light_denoise(preview_arr, h=3)
+                preview_arr = clahe_preprocess(preview_arr, clip_limit=3.0)
 
                 h_full, w_full = preview_arr.shape[:2]
                 scales_feats = []
@@ -545,151 +689,54 @@ class PlacementWorker(QThread):
                 placements[record.id] = p
                 placed_count += 1
             else:
+                # Save best partial match info for second-pass attempt
+                odds_and_ends.append((record.id, best_inliers,
+                                      best_ref_centroid, best_rot))
+
+        # ── 3b. Second pass — place near-misses with relaxed threshold ────
+        # Images that got SOME inliers but not enough for the strict threshold
+        # often have useful position info.  Accept them at a lower bar.
+        still_unmatched = []
+        for uid, n_inliers, ref_centroid, rot in odds_and_ends:
+            if n_inliers >= MIN_MATCHES_RELAXED and ref_centroid:
+                cx, cy = ref_centroid
+                record = self.store.get_record(uid)
+                if record:
+                    aspect = record.width / max(record.height, 1)
+                    tile_w = self._thumb_edge if aspect >= 1 else self._thumb_edge * aspect
+                    tile_h = self._thumb_edge / aspect if aspect >= 1 else self._thumb_edge
+                else:
+                    tile_w = tile_h = self._thumb_edge
+                final_x = cx - tile_w / 2
+                final_y = cy - tile_h / 2
+                p = ImagePlacement(
+                    image_id=uid,
+                    x=final_x, y=final_y, rotation=rot,
+                    z_order=placed_count,
+                    auto_x=final_x, auto_y=final_y, auto_rotation=rot,
+                )
+                placements[uid] = p
+                placed_count += 1
+                log.info("Second-pass placed %s with %d inliers (relaxed threshold)",
+                         uid[:6], n_inliers)
+            else:
                 gx, gy, gr = 0.0, 0.0, 0.0
-                if best_ref_centroid:
-                    gx = best_ref_centroid[0]
-                    gy = best_ref_centroid[1]
-                    gr = best_rot
-                odds_and_ends.append((record.id, gx, gy, gr))
+                if ref_centroid:
+                    gx, gy = ref_centroid
+                    gr = rot
+                still_unmatched.append((uid, gx, gy, gr))
+        odds_and_ends = [(uid, gx, gy, gr) for uid, gx, gy, gr in still_unmatched]
 
         # ── 4. Template matching fallback for low-quality images ─────────────
-        # Keypoint matching fails on soft/noisy images (e.g. Kodak Charmer).
-        # Template matching (normalized cross-correlation) works on overall
-        # appearance and handles blurry images well.  We try it for anything
-        # that didn't place via keypoints.
-        if odds_and_ends and ref_features:
-            import cv2 as cv2_tmpl
-
-            # Build greyscale reference composites for template matching
-            ref_grey = {}  # slot → grey numpy array at preview res
-            for ref in refs:
-                try:
-                    pil = PILImage.open(ref.source_path).convert("L")
-                    w, h = pil.size
-                    scale = PREVIEW_LONG_EDGE / max(w, h)
-                    new_w, new_h = int(w * scale), int(h * scale)
-                    pil = pil.resize((new_w, new_h), PILImage.LANCZOS)
-                    ref_grey[ref.slot] = np.array(pil)
-                except Exception:
-                    pass
-
-            still_unplaced = []
-            for uid, gx, gy, gr in odds_and_ends:
-                try:
-                    # Get detail as greyscale
-                    preview_arr = self.store.get_preview(uid)
-                    if preview_arr is None:
-                        preview_arr = self.store.get_thumbnail(uid)
-                    if preview_arr is None:
-                        still_unplaced.append((uid, gx, gy, gr))
-                        continue
-
-                    detail_grey = cv2_tmpl.cvtColor(preview_arr, cv2_tmpl.COLOR_RGB2GRAY)
-                    # Denoise the detail — helps a lot with chunky camera images
-                    detail_grey = cv2_tmpl.GaussianBlur(detail_grey, (3, 3), 0)
-
-                    best_val = -1.0
-                    best_loc = None
-                    best_slot = None
-                    best_tmpl_scale = 1.0
-
-                    for slot, rg in ref_grey.items():
-                        # Try template at multiple scales (detail may cover
-                        # a small or large fraction of the reference)
-                        dh, dw = detail_grey.shape[:2]
-                        rh, rw = rg.shape[:2]
-
-                        for tmpl_scale in [1.0, 0.75, 0.5, 0.35, 0.25]:
-                            sw = int(dw * tmpl_scale)
-                            sh = int(dh * tmpl_scale)
-                            if sw < 16 or sh < 16 or sw >= rw or sh >= rh:
-                                continue
-
-                            if tmpl_scale < 1.0:
-                                tmpl = cv2_tmpl.resize(
-                                    detail_grey, (sw, sh),
-                                    interpolation=cv2_tmpl.INTER_AREA,
-                                )
-                            else:
-                                tmpl = detail_grey
-                                if dw >= rw or dh >= rh:
-                                    continue
-
-                            result = cv2_tmpl.matchTemplate(
-                                rg, tmpl, cv2_tmpl.TM_CCOEFF_NORMED,
-                            )
-                            _, max_val, _, max_loc = cv2_tmpl.minMaxLoc(result)
-
-                            if max_val > best_val:
-                                best_val = max_val
-                                best_loc = max_loc
-                                best_slot = slot
-                                best_tmpl_scale = tmpl_scale
-
-                    # Accept if correlation is decent (0.35+ is reasonable
-                    # for noisy images; 0.5+ is a good match).
-                    # Bumped from 0.25 to reduce false-positive placements.
-                    if best_val >= 0.35 and best_loc and best_slot:
-                        mx, my = best_loc
-                        sw = int(detail_grey.shape[1] * best_tmpl_scale)
-                        sh = int(detail_grey.shape[0] * best_tmpl_scale)
-                        # Centroid of matched region in reference coords
-                        cx = mx + sw / 2
-                        cy = my + sh / 2
-
-                        # Perspective offset
-                        if self.config.project_type == "perspective":
-                            offsets = {
-                                "standing": (0, 0), "left": (-1, 0),
-                                "right": (1, 0), "down_low": (0, 1),
-                                "up_high": (0, -1),
-                            }
-                            ox, oy = offsets.get(best_slot, (0, 0))
-                            rw_s, rh_s = ref_sizes.get(
-                                best_slot,
-                                (PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE),
-                            )
-                            cx += ox * rw_s
-                            cy += oy * rh_s
-
-                        final_x = cx
-                        final_y = cy
-
-                        record = self.store.get_record(uid)
-                        if record:
-                            aspect = record.width / max(record.height, 1)
-                            tile_w = self._thumb_edge if aspect >= 1 else self._thumb_edge * aspect
-                            tile_h = self._thumb_edge / aspect if aspect >= 1 else self._thumb_edge
-                        else:
-                            tile_w = tile_h = self._thumb_edge
-                        final_x -= tile_w / 2
-                        final_y -= tile_h / 2
-
-                        p = ImagePlacement(
-                            image_id=uid,
-                            x=final_x, y=final_y, rotation=0.0,
-                            z_order=placed_count,
-                            auto_x=final_x, auto_y=final_y, auto_rotation=0.0,
-                        )
-                        placements[uid] = p
-                        placed_count += 1
-                        log.info("Template matched %s in %s (corr=%.2f, scale=%.0f%%)",
-                                 uid[:6], best_slot, best_val, best_tmpl_scale * 100)
-                    else:
-                        still_unplaced.append((uid, gx, gy, gr))
-                except Exception as e:
-                    log.debug("Template match failed for %s: %s", uid[:6], e)
-                    still_unplaced.append((uid, gx, gy, gr))
-
-            odds_and_ends = still_unplaced
-            log.info("Template matching rescued %d images from Odds & Ends",
-                     len(still_unplaced) - len(odds_and_ends)
-                     if len(still_unplaced) < len(odds_and_ends) else 0)
+        if odds_and_ends:
+            placements, odds_and_ends, placed_count = self._template_fallback(
+                records, placements, odds_and_ends, placed_count,
+            )
 
         # ── 5. Spread overlapping tiles ─────────────────────────────────────
         # Multiple detail shots covering the same area stack on top of each
         # other.  Nudge them apart so the joiner looks assembled, not piled.
-        _spread_overlaps(placements, self._thumb_edge, OVERLAP_REPEL)
+        _spread_overlaps(placements, self._thumb_edge, OVERLAP_REPEL, OVERLAP_THRESHOLD)
 
         # ── 6. Odds & Ends tray — place unmatched below the composition ──────
         fallback_count = len(odds_and_ends)
@@ -722,6 +769,12 @@ class PlacementWorker(QThread):
         if fallback_count:
             msg += f" {fallback_count} in Odds & Ends tray."
 
+        # Log results
+        if plog:
+            plog.set_engine("disk_lightglue")
+            plog.set_counts(total, matched, fallback_count)
+            plog.flush()
+
         log.info(msg)
         return PlacementResult(
             placements=result_list,
@@ -730,23 +783,164 @@ class PlacementWorker(QThread):
             message=msg,
         )
 
+    # ── Template matching fallback (shared by DISK and SIFT paths) ────────
+
+    def _template_fallback(self, records, placements, odds_and_ends, placed_count):
+        """
+        Try template matching (cv2.matchTemplate) for images that failed
+        keypoint matching.  Works on overall appearance — handles blurry
+        and noisy images better than keypoint methods.
+        Returns updated (placements, odds_and_ends, placed_count).
+        """
+        import cv2 as cv2_tmpl
+        import numpy as np
+        from PIL import Image as PILImage
+
+        refs = self.config.references
+        ref_sizes = {}
+
+        # Build greyscale reference images
+        ref_grey = {}
+        for ref in refs:
+            try:
+                pil = PILImage.open(ref.source_path).convert("RGB")
+                w, h = pil.size
+                scale = PREVIEW_LONG_EDGE / max(w, h)
+                new_w, new_h = int(w * scale), int(h * scale)
+                pil = pil.resize((new_w, new_h), PILImage.LANCZOS)
+                ref_sizes[ref.slot] = (new_w, new_h)
+                # CLAHE before greyscale conversion for better contrast
+                from hockney.core.placement_sift import clahe_preprocess
+                arr = clahe_preprocess(np.array(pil), clip_limit=3.0)
+                ref_grey[ref.slot] = cv2_tmpl.cvtColor(arr, cv2_tmpl.COLOR_RGB2GRAY)
+            except Exception:
+                pass
+
+        if not ref_grey:
+            return placements, odds_and_ends, placed_count
+
+        still_unplaced = []
+        for uid, gx, gy, gr in odds_and_ends:
+            try:
+                preview_arr = self.store.get_preview(uid)
+                if preview_arr is None:
+                    preview_arr = self.store.get_thumbnail(uid)
+                if preview_arr is None:
+                    still_unplaced.append((uid, gx, gy, gr))
+                    continue
+
+                # CLAHE + greyscale
+                from hockney.core.placement_sift import clahe_preprocess
+                preview_arr = clahe_preprocess(preview_arr, clip_limit=3.0)
+                detail_grey = cv2_tmpl.cvtColor(preview_arr, cv2_tmpl.COLOR_RGB2GRAY)
+                detail_grey = cv2_tmpl.GaussianBlur(detail_grey, (3, 3), 0)
+
+                best_val = -1.0
+                best_loc = None
+                best_slot = None
+                best_tmpl_scale = 1.0
+
+                for slot, rg in ref_grey.items():
+                    dh, dw = detail_grey.shape[:2]
+                    rh, rw = rg.shape[:2]
+
+                    for tmpl_scale in [1.0, 0.75, 0.5, 0.35, 0.25]:
+                        sw = int(dw * tmpl_scale)
+                        sh = int(dh * tmpl_scale)
+                        if sw < 16 or sh < 16 or sw >= rw or sh >= rh:
+                            continue
+
+                        if tmpl_scale < 1.0:
+                            tmpl = cv2_tmpl.resize(detail_grey, (sw, sh),
+                                                   interpolation=cv2_tmpl.INTER_AREA)
+                        else:
+                            tmpl = detail_grey
+                            if dw >= rw or dh >= rh:
+                                continue
+
+                        result = cv2_tmpl.matchTemplate(
+                            rg, tmpl, cv2_tmpl.TM_CCOEFF_NORMED)
+                        _, max_val, _, max_loc = cv2_tmpl.minMaxLoc(result)
+
+                        if max_val > best_val:
+                            best_val = max_val
+                            best_loc = max_loc
+                            best_slot = slot
+                            best_tmpl_scale = tmpl_scale
+
+                if best_val >= 0.35 and best_loc and best_slot:
+                    mx, my = best_loc
+                    sw = int(detail_grey.shape[1] * best_tmpl_scale)
+                    sh = int(detail_grey.shape[0] * best_tmpl_scale)
+                    cx = mx + sw / 2
+                    cy = my + sh / 2
+
+                    if self.config.project_type == "perspective":
+                        offsets = {
+                            "standing": (0, 0), "left": (-1, 0),
+                            "right": (1, 0), "down_low": (0, 1),
+                            "up_high": (0, -1),
+                        }
+                        ox, oy = offsets.get(best_slot, (0, 0))
+                        rw_s, rh_s = ref_sizes.get(
+                            best_slot, (PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE))
+                        cx += ox * rw_s
+                        cy += oy * rh_s
+
+                    final_x = cx
+                    final_y = cy
+
+                    record = self.store.get_record(uid)
+                    if record:
+                        aspect = record.width / max(record.height, 1)
+                        tile_w = self._thumb_edge if aspect >= 1 else self._thumb_edge * aspect
+                        tile_h = self._thumb_edge / aspect if aspect >= 1 else self._thumb_edge
+                    else:
+                        tile_w = tile_h = self._thumb_edge
+                    final_x -= tile_w / 2
+                    final_y -= tile_h / 2
+
+                    p = ImagePlacement(
+                        image_id=uid,
+                        x=final_x, y=final_y, rotation=0.0,
+                        z_order=placed_count,
+                        auto_x=final_x, auto_y=final_y, auto_rotation=0.0,
+                    )
+                    placements[uid] = p
+                    placed_count += 1
+                    log.info("Template matched %s in %s (corr=%.2f, scale=%.0f%%)",
+                             uid[:6], best_slot, best_val, best_tmpl_scale * 100)
+                else:
+                    still_unplaced.append((uid, gx, gy, gr))
+            except Exception as e:
+                log.debug("Template match failed for %s: %s", uid[:6], e)
+                still_unplaced.append((uid, gx, gy, gr))
+
+        rescued = len(odds_and_ends) - len(still_unplaced)
+        if rescued > 0:
+            log.info("Template matching rescued %d images", rescued)
+
+        return placements, still_unplaced, placed_count
+
 
 # ── Overlap spreading ─────────────────────────────────────────────────────────
 
 def _spread_overlaps(placements: dict[str, ImagePlacement],
                      tile_size: float, repel_frac: float,
+                     overlap_threshold: float = 0.35,
                      iterations: int = 3):
     """
     Gently nudge tiles that overlap so they spread out instead of piling up.
     Each iteration pushes overlapping pairs apart by `repel_frac` of tile_size.
-    This preserves the general reference-mapped position while adding the
-    natural spread of a real Hockney joiner.
+    Only pushes tiles whose centres are closer than `overlap_threshold * tile_size`.
+    Low repel_frac = tight shingling (more Hockney-like).
     """
     if len(placements) < 2:
         return
 
     ids = list(placements.keys())
     push = tile_size * repel_frac
+    min_dist = tile_size * overlap_threshold
 
     for _ in range(iterations):
         for i in range(len(ids)):
@@ -757,8 +951,7 @@ def _spread_overlaps(placements: dict[str, ImagePlacement],
                 dy = p_b.y - p_a.y
                 dist = math.sqrt(dx * dx + dy * dy)
 
-                # If centres are closer than half a tile, they're overlapping
-                if dist < tile_size * 0.5:
+                if dist < min_dist:
                     if dist < 1.0:
                         # Near-identical position — push in arbitrary direction
                         dx, dy, dist = 1.0, 0.5, 1.118
