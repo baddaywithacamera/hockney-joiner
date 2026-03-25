@@ -422,8 +422,10 @@ class PlacementWorker(QThread):
         odds_and_ends = []
         placed_count = 0
 
-        # Canvas scale: reference pixels → canvas (thumbnail) pixels
-        canvas_scale = self._thumb_edge / PREVIEW_LONG_EDGE
+        # NO canvas_scale — place at reference pixel coordinates.
+        # Tiles are self._thumb_edge pixels wide but the reference is
+        # PREVIEW_LONG_EDGE pixels wide.  This means tiles will tile
+        # across the reference naturally.  fit_all() zooms the view.
 
         for record in records:
             if self._cancelled:
@@ -493,9 +495,9 @@ class PlacementWorker(QThread):
                     cx += ox * rw
                     cy += oy * rh
 
-                # Scale from reference pixels to canvas pixels
-                final_x = cx * canvas_scale
-                final_y = cy * canvas_scale
+                # Place at reference pixel coordinates directly
+                final_x = cx
+                final_y = cy
 
                 # Centre the tile on the match point (tile is at thumb size)
                 aspect = record.width / max(record.height, 1)
@@ -519,8 +521,8 @@ class PlacementWorker(QThread):
             else:
                 gx, gy, gr = 0.0, 0.0, 0.0
                 if best_ref_centroid:
-                    gx = best_ref_centroid[0] * canvas_scale
-                    gy = best_ref_centroid[1] * canvas_scale
+                    gx = best_ref_centroid[0]
+                    gy = best_ref_centroid[1]
                     gr = best_rot
                 odds_and_ends.append((record.id, gx, gy, gr))
 
@@ -623,8 +625,8 @@ class PlacementWorker(QThread):
                             cx += ox * rw_s
                             cy += oy * rh_s
 
-                        final_x = cx * canvas_scale
-                        final_y = cy * canvas_scale
+                        final_x = cx
+                        final_y = cy
 
                         record = self.store.get_record(uid)
                         if record:
