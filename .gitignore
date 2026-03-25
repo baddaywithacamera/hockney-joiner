@@ -49,3 +49,6 @@ htmlcov/
 
 # Logs
 *.log
+
+# Dev session notes (context for AI-assisted development)
+SESSION_NOTES.md

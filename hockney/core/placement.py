@@ -37,15 +37,21 @@ THUMB_LONG_EDGE = 300
 PREVIEW_LONG_EDGE = 1500
 GRID_PADDING = 24
 MIN_MATCHES = 12        # minimum inlier keypoint pairs to trust a transform
-MAX_KEYPOINTS = 1024    # per image, for DISK
+MAX_KEYPOINTS = 2048    # per image, for DISK (bumped from 1024 for better ref matching)
+RANSAC_REPROJ = 5.0     # RANSAC reprojection threshold (px) for reference matching
+OVERLAP_REPEL = 0.3     # fraction of tile size to nudge overlapping tiles apart
 
 # Subject-type tuning overrides
 SUBJECT_TUNING = {
-    "landscape":  {"max_keypoints": 1024, "min_matches": 12},
-    "skylife":    {"max_keypoints": 512,  "min_matches": 8},
-    "urban":      {"max_keypoints": 2048, "min_matches": 15},
-    "indoor":     {"max_keypoints": 1024, "min_matches": 10},
-    "people":     {"max_keypoints": 1024, "min_matches": 12},
+    "landscape":  {"max_keypoints": 2048, "min_matches": 10},
+    "skylife":    {"max_keypoints": 1024, "min_matches": 8},
+    "urban":      {"max_keypoints": 2048, "min_matches": 12},
+    "indoor":     {"max_keypoints": 2048, "min_matches": 8},
+    "people":     {"max_keypoints": 2048, "min_matches": 10},
+    "object":     {"max_keypoints": 2048, "min_matches": 8},
+    "vehicle":    {"max_keypoints": 2048, "min_matches": 10},
+    "building":   {"max_keypoints": 2048, "min_matches": 12},
+    "person":     {"max_keypoints": 2048, "min_matches": 10},
 }
 
 
@@ -379,11 +385,12 @@ class PlacementWorker(QThread):
                 if preview_arr is None:
                     continue
 
-                # Denoise before feature extraction — helps with soft/noisy
-                # camera images (e.g. Kodak Charmer)
+                # Light denoise before feature extraction — helps with soft/noisy
+                # camera images (e.g. Kodak Charmer).  Keep h low (3-4) to
+                # preserve edges that DISK needs.
                 import cv2 as cv2_pre
                 preview_arr = cv2_pre.fastNlMeansDenoisingColored(
-                    preview_arr, None, 6, 6, 7, 21,
+                    preview_arr, None, 3, 3, 7, 21,
                 )
 
                 h_full, w_full = preview_arr.shape[:2]
@@ -458,12 +465,31 @@ class PlacementWorker(QThread):
                         m_kp_ref = kp_ref[matches[:, 0].cpu().numpy()]
                         m_kp_det = kp_det[matches[:, 1].cpu().numpy()]
 
-                        n_inliers = len(m_kp_ref)
+                        if len(m_kp_ref) < 4:
+                            continue
+
+                        # RANSAC filter — only trust geometrically consistent
+                        # matches.  Raw LightGlue matches include outliers that
+                        # pull the centroid off-target.
+                        import cv2 as cv2_ransac
+                        M, inlier_mask = cv2_ransac.estimateAffinePartial2D(
+                            m_kp_ref.reshape(-1, 1, 2).astype(np.float32),
+                            m_kp_det.reshape(-1, 1, 2).astype(np.float32),
+                            method=cv2_ransac.RANSAC,
+                            ransacReprojThreshold=RANSAC_REPROJ,
+                        )
+                        if M is None or inlier_mask is None:
+                            continue
+
+                        inlier_idx = inlier_mask.ravel().astype(bool)
+                        n_inliers = int(inlier_idx.sum())
+
                         if n_inliers > best_inliers and n_inliers >= self._min_matches:
-                            cx = float(m_kp_ref[:, 0].mean())
-                            cy = float(m_kp_ref[:, 1].mean())
-                            t = _estimate_transform(m_kp_ref, m_kp_det)
-                            rot = t[2] if t else 0.0
+                            # Centroid from RANSAC inliers only
+                            inlier_ref = m_kp_ref[inlier_idx]
+                            cx = float(inlier_ref[:, 0].mean())
+                            cy = float(inlier_ref[:, 1].mean())
+                            rot = math.degrees(math.atan2(M[1, 0], M[0, 0]))
 
                             best_slot = slot
                             best_inliers = n_inliers
@@ -600,9 +626,10 @@ class PlacementWorker(QThread):
                                 best_slot = slot
                                 best_tmpl_scale = tmpl_scale
 
-                    # Accept if correlation is decent (0.3+ is reasonable
-                    # for noisy images; 0.5+ is a good match)
-                    if best_val >= 0.25 and best_loc and best_slot:
+                    # Accept if correlation is decent (0.35+ is reasonable
+                    # for noisy images; 0.5+ is a good match).
+                    # Bumped from 0.25 to reduce false-positive placements.
+                    if best_val >= 0.35 and best_loc and best_slot:
                         mx, my = best_loc
                         sw = int(detail_grey.shape[1] * best_tmpl_scale)
                         sh = int(detail_grey.shape[0] * best_tmpl_scale)
@@ -659,7 +686,12 @@ class PlacementWorker(QThread):
                      len(still_unplaced) - len(odds_and_ends)
                      if len(still_unplaced) < len(odds_and_ends) else 0)
 
-        # ── 5. Odds & Ends tray — place unmatched below the composition ──────
+        # ── 5. Spread overlapping tiles ─────────────────────────────────────
+        # Multiple detail shots covering the same area stack on top of each
+        # other.  Nudge them apart so the joiner looks assembled, not piled.
+        _spread_overlaps(placements, self._thumb_edge, OVERLAP_REPEL)
+
+        # ── 6. Odds & Ends tray — place unmatched below the composition ──────
         fallback_count = len(odds_and_ends)
         if odds_and_ends:
             placed_ys = [p.y for p in placements.values()] or [0.0]
@@ -697,6 +729,49 @@ class PlacementWorker(QThread):
             fallback_count=fallback_count,
             message=msg,
         )
+
+
+# ── Overlap spreading ─────────────────────────────────────────────────────────
+
+def _spread_overlaps(placements: dict[str, ImagePlacement],
+                     tile_size: float, repel_frac: float,
+                     iterations: int = 3):
+    """
+    Gently nudge tiles that overlap so they spread out instead of piling up.
+    Each iteration pushes overlapping pairs apart by `repel_frac` of tile_size.
+    This preserves the general reference-mapped position while adding the
+    natural spread of a real Hockney joiner.
+    """
+    if len(placements) < 2:
+        return
+
+    ids = list(placements.keys())
+    push = tile_size * repel_frac
+
+    for _ in range(iterations):
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                p_a = placements[ids[i]]
+                p_b = placements[ids[j]]
+                dx = p_b.x - p_a.x
+                dy = p_b.y - p_a.y
+                dist = math.sqrt(dx * dx + dy * dy)
+
+                # If centres are closer than half a tile, they're overlapping
+                if dist < tile_size * 0.5:
+                    if dist < 1.0:
+                        # Near-identical position — push in arbitrary direction
+                        dx, dy, dist = 1.0, 0.5, 1.118
+                    nx = dx / dist
+                    ny = dy / dist
+                    p_a.x -= nx * push * 0.5
+                    p_a.y -= ny * push * 0.5
+                    p_a.auto_x = p_a.x
+                    p_a.auto_y = p_a.y
+                    p_b.x += nx * push * 0.5
+                    p_b.y += ny * push * 0.5
+                    p_b.auto_x = p_b.x
+                    p_b.auto_y = p_b.y
 
 
 # ── Transform helpers ──────────────────────────────────────────────────────────
