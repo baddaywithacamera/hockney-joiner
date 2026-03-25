@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QListWidget,
     QPushButton,
+    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -44,7 +45,19 @@ class Sidebar(QWidget):
         self._build_ui()
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
+        # Outer layout holds the scroll area
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        outer.addWidget(scroll)
+
+        # Inner widget holds all sidebar content
+        self._inner = QWidget()
+        scroll.setWidget(self._inner)
+        layout = QVBoxLayout(self._inner)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(12)
 
@@ -192,11 +205,11 @@ class Sidebar(QWidget):
 
     def set_project_config(self, config: ProjectConfig | None):
         """Show or update the reference panel for the current project config."""
-        layout = self.layout()
+        inner_layout = self._inner.layout()
         if config is None:
             # Remove existing reference panel
             if self._ref_panel:
-                layout.removeWidget(self._ref_panel)
+                inner_layout.removeWidget(self._ref_panel)
                 self._ref_panel.deleteLater()
                 self._ref_panel = None
             return
@@ -204,10 +217,10 @@ class Sidebar(QWidget):
         if self._ref_panel:
             self._ref_panel.set_config(config)
         else:
-            self._ref_panel = ReferencePanel(config, parent=self)
+            self._ref_panel = ReferencePanel(config, parent=self._inner)
             self._ref_panel.reference_changed.connect(self.reference_changed)
             # Insert at top of sidebar (index 0)
-            layout.insertWidget(0, self._ref_panel)
+            inner_layout.insertWidget(0, self._ref_panel)
 
     def refresh(self):
         self.image_list.clear()
