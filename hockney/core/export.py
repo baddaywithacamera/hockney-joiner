@@ -148,7 +148,13 @@ def render_composite(
 
     log.info("Canvas: %dx%d at scale %.1f×", canvas_w, canvas_h, scale)
 
-    canvas = Image.new("RGB", (canvas_w, canvas_h), color=(30, 30, 30))
+    transparent = processing.get("transparent_bg", False)
+    bg_color = processing.get("bg_color", (30, 30, 30))
+
+    if transparent:
+        canvas = Image.new("RGBA", (canvas_w, canvas_h), color=(0, 0, 0, 0))
+    else:
+        canvas = Image.new("RGB", (canvas_w, canvas_h), color=bg_color)
     n = len(sorted_placements)
 
     for i, p in enumerate(sorted_placements):
@@ -200,7 +206,10 @@ def render_composite(
 
         # Use alpha channel as mask so rotated corners don't leave rectangles
         alpha = rotated.split()[3] if rotated.mode == "RGBA" else None
-        canvas.paste(rotated.convert("RGB"), (paste_x, paste_y), alpha)
+        if transparent:
+            canvas.paste(rotated, (paste_x, paste_y), alpha)
+        else:
+            canvas.paste(rotated.convert("RGB"), (paste_x, paste_y), alpha)
 
         if progress_cb:
             progress_cb(int((i + 1) / n * 95))
@@ -264,6 +273,14 @@ class ExportWorker(QThread):
 
     def _save(self, img):
         suffix = self.output_path.suffix.lower()
+        # JPEG doesn't support alpha — flatten to RGB
+        if suffix in (".jpg", ".jpeg") and img.mode == "RGBA":
+            bg = img.copy()
+            bg_color = self.processing.get("bg_color", (30, 30, 30))
+            flat = __import__("PIL").Image.new("RGB", img.size, bg_color)
+            flat.paste(img, mask=img.split()[3])
+            img = flat
+
         if suffix in (".tif", ".tiff"):
             img.save(self.output_path, format="TIFF", compression="lzw")
         elif suffix == ".png":

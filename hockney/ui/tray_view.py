@@ -491,6 +491,11 @@ class TrayView(QGraphicsView):
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
+    def set_bg_color(self, color: QColor):
+        """Update the canvas background colour from the sidebar picker."""
+        self.setBackgroundBrush(color)
+        self.viewport().update()
+
     def refresh(self):
         """Rebuild canvas from current store contents."""
         self._scene.clear()

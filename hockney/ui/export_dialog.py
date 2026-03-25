@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -32,6 +33,7 @@ class ExportDialog(QDialog):
 
         self.output_path: str = ""
         self.scale_mode = "medium"
+        self.transparent_bg = False
 
         self._build_ui()
 
@@ -62,6 +64,14 @@ class ExportDialog(QDialog):
         ])
         self._scale_combo.setCurrentIndex(0)
         form.addRow("Resolution:", self._scale_combo)
+
+        # ── Transparent background ───────────────────────────────────────────
+        self._transparent_cb = QCheckBox("Transparent background  (PNG only)")
+        self._transparent_cb.setToolTip(
+            "Export with no background — useful for layering in Photoshop.\n"
+            "Only works with PNG output; JPEG/TIFF will use the canvas colour."
+        )
+        form.addRow("", self._transparent_cb)
 
         layout.addLayout(form)
 
@@ -101,4 +111,5 @@ class ExportDialog(QDialog):
 
         idx = self._scale_combo.currentIndex()
         self.scale_mode = ["medium", "full", "screen"][idx]
+        self.transparent_bg = self._transparent_cb.isChecked()
         self.accept()

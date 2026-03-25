@@ -7,6 +7,7 @@ from __future__ import annotations
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -19,6 +20,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 
 from pathlib import Path
 
@@ -36,6 +38,7 @@ FILTER_OPTIONS = [
 class Sidebar(QWidget):
     process_requested = pyqtSignal(dict)
     reference_changed = pyqtSignal()
+    bg_color_changed = pyqtSignal(QColor)
 
     def __init__(self, store: ImageStore, models_dir: Path | None = None,
                  parent: QWidget | None = None):
@@ -128,6 +131,23 @@ class Sidebar(QWidget):
 
         layout.addWidget(surface_group)
 
+        # ── Background colour ─────────────────────────────────────────────────
+        bg_group = QGroupBox("Background")
+        bg_layout = QHBoxLayout(bg_group)
+
+        self._bg_color = QColor(28, 28, 28)   # default dark gray
+        self._bg_swatch = QPushButton()
+        self._bg_swatch.setFixedSize(36, 36)
+        self._update_swatch()
+        self._bg_swatch.setToolTip("Click to pick background colour")
+        self._bg_swatch.clicked.connect(self._pick_bg_color)
+        bg_layout.addWidget(self._bg_swatch)
+
+        bg_layout.addWidget(QLabel("Canvas colour"))
+        bg_layout.addStretch()
+
+        layout.addWidget(bg_group)
+
         # ── Matching engine selector ─────────────────────────────────────────
         engine_group = QGroupBox("Matching Engine")
         engine_layout = QVBoxLayout(engine_group)
@@ -179,6 +199,27 @@ class Sidebar(QWidget):
         self.info_label.setStyleSheet("color: #888; font-size: 10px;")
         layout.addWidget(self.info_label)
 
+    def _update_swatch(self):
+        """Update the colour swatch button to show the current bg colour."""
+        c = self._bg_color
+        self._bg_swatch.setStyleSheet(
+            f"background: rgb({c.red()},{c.green()},{c.blue()});"
+            "border: 2px solid #666; border-radius: 4px;"
+        )
+
+    def _pick_bg_color(self):
+        color = QColorDialog.getColor(
+            self._bg_color, self, "Background Colour",
+        )
+        if color.isValid():
+            self._bg_color = color
+            self._update_swatch()
+            self.bg_color_changed.emit(color)
+
+    @property
+    def bg_color(self) -> QColor:
+        return self._bg_color
+
     def _on_tile_size_changed(self, value: int):
         # Snap to nearest 50
         snapped = round(value / 50) * 50
@@ -218,12 +259,14 @@ class Sidebar(QWidget):
         self.process_requested.emit(settings)
 
     def get_processing_settings(self) -> dict:
+        c = self._bg_color
         return {
             "histogram_eq": self.eq_checkbox.isChecked(),
             "filter": self.filter_combo.currentText(),
             "surface_effect": self.surface_combo.currentText(),
             "surface_intensity": self.intensity_slider.value(),
             "tile_size": self.tile_slider.value(),
+            "bg_color": (c.red(), c.green(), c.blue()),
         }
 
     def apply_processing_settings(self, settings: dict):

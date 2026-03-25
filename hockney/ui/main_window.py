@@ -323,6 +323,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.sidebar.process_requested.connect(self._on_process_requested)
         self.sidebar.reference_changed.connect(self._on_reference_changed)
+        self.sidebar.bg_color_changed.connect(self.tray_view.set_bg_color)
         self.tray_view.image_activated.connect(self._on_image_activated)
         self.tray_view.deal_mode_changed.connect(self._on_deal_mode_changed)
         # Connect moondream chat panel to the tray view
@@ -581,6 +582,7 @@ class MainWindow(QMainWindow):
 
         from hockney.core.export import ExportWorker
         processing = self.sidebar.get_processing_settings()
+        processing["transparent_bg"] = dialog.transparent_bg
         worker = ExportWorker(placements, self.store, Path(output_path), scale_mode, processing)
 
         progress = QProgressDialog("Rendering composite…", None, 0, 100, self)
