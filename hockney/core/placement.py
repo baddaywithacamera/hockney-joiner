@@ -379,6 +379,13 @@ class PlacementWorker(QThread):
                 if preview_arr is None:
                     continue
 
+                # Denoise before feature extraction — helps with soft/noisy
+                # camera images (e.g. Kodak Charmer)
+                import cv2 as cv2_pre
+                preview_arr = cv2_pre.fastNlMeansDenoisingColored(
+                    preview_arr, None, 6, 6, 7, 21,
+                )
+
                 h_full, w_full = preview_arr.shape[:2]
                 scales_feats = []
 
@@ -516,6 +523,139 @@ class PlacementWorker(QThread):
                     gy = best_ref_centroid[1] * canvas_scale
                     gr = best_rot
                 odds_and_ends.append((record.id, gx, gy, gr))
+
+        # ── 4. Template matching fallback for low-quality images ─────────────
+        # Keypoint matching fails on soft/noisy images (e.g. Kodak Charmer).
+        # Template matching (normalized cross-correlation) works on overall
+        # appearance and handles blurry images well.  We try it for anything
+        # that didn't place via keypoints.
+        if odds_and_ends and ref_features:
+            import cv2 as cv2_tmpl
+
+            # Build greyscale reference composites for template matching
+            ref_grey = {}  # slot → grey numpy array at preview res
+            for ref in refs:
+                try:
+                    pil = PILImage.open(ref.source_path).convert("L")
+                    w, h = pil.size
+                    scale = PREVIEW_LONG_EDGE / max(w, h)
+                    new_w, new_h = int(w * scale), int(h * scale)
+                    pil = pil.resize((new_w, new_h), PILImage.LANCZOS)
+                    ref_grey[ref.slot] = np.array(pil)
+                except Exception:
+                    pass
+
+            still_unplaced = []
+            for uid, gx, gy, gr in odds_and_ends:
+                try:
+                    # Get detail as greyscale
+                    preview_arr = self.store.get_preview(uid)
+                    if preview_arr is None:
+                        preview_arr = self.store.get_thumbnail(uid)
+                    if preview_arr is None:
+                        still_unplaced.append((uid, gx, gy, gr))
+                        continue
+
+                    detail_grey = cv2_tmpl.cvtColor(preview_arr, cv2_tmpl.COLOR_RGB2GRAY)
+                    # Denoise the detail — helps a lot with chunky camera images
+                    detail_grey = cv2_tmpl.GaussianBlur(detail_grey, (3, 3), 0)
+
+                    best_val = -1.0
+                    best_loc = None
+                    best_slot = None
+                    best_tmpl_scale = 1.0
+
+                    for slot, rg in ref_grey.items():
+                        # Try template at multiple scales (detail may cover
+                        # a small or large fraction of the reference)
+                        dh, dw = detail_grey.shape[:2]
+                        rh, rw = rg.shape[:2]
+
+                        for tmpl_scale in [1.0, 0.75, 0.5, 0.35, 0.25]:
+                            sw = int(dw * tmpl_scale)
+                            sh = int(dh * tmpl_scale)
+                            if sw < 16 or sh < 16 or sw >= rw or sh >= rh:
+                                continue
+
+                            if tmpl_scale < 1.0:
+                                tmpl = cv2_tmpl.resize(
+                                    detail_grey, (sw, sh),
+                                    interpolation=cv2_tmpl.INTER_AREA,
+                                )
+                            else:
+                                tmpl = detail_grey
+                                if dw >= rw or dh >= rh:
+                                    continue
+
+                            result = cv2_tmpl.matchTemplate(
+                                rg, tmpl, cv2_tmpl.TM_CCOEFF_NORMED,
+                            )
+                            _, max_val, _, max_loc = cv2_tmpl.minMaxLoc(result)
+
+                            if max_val > best_val:
+                                best_val = max_val
+                                best_loc = max_loc
+                                best_slot = slot
+                                best_tmpl_scale = tmpl_scale
+
+                    # Accept if correlation is decent (0.3+ is reasonable
+                    # for noisy images; 0.5+ is a good match)
+                    if best_val >= 0.25 and best_loc and best_slot:
+                        mx, my = best_loc
+                        sw = int(detail_grey.shape[1] * best_tmpl_scale)
+                        sh = int(detail_grey.shape[0] * best_tmpl_scale)
+                        # Centroid of matched region in reference coords
+                        cx = mx + sw / 2
+                        cy = my + sh / 2
+
+                        # Perspective offset
+                        if self.config.project_type == "perspective":
+                            offsets = {
+                                "standing": (0, 0), "left": (-1, 0),
+                                "right": (1, 0), "down_low": (0, 1),
+                                "up_high": (0, -1),
+                            }
+                            ox, oy = offsets.get(best_slot, (0, 0))
+                            rw_s, rh_s = ref_sizes.get(
+                                best_slot,
+                                (PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE),
+                            )
+                            cx += ox * rw_s
+                            cy += oy * rh_s
+
+                        final_x = cx * canvas_scale
+                        final_y = cy * canvas_scale
+
+                        record = self.store.get_record(uid)
+                        if record:
+                            aspect = record.width / max(record.height, 1)
+                            tile_w = self._thumb_edge if aspect >= 1 else self._thumb_edge * aspect
+                            tile_h = self._thumb_edge / aspect if aspect >= 1 else self._thumb_edge
+                        else:
+                            tile_w = tile_h = self._thumb_edge
+                        final_x -= tile_w / 2
+                        final_y -= tile_h / 2
+
+                        p = ImagePlacement(
+                            image_id=uid,
+                            x=final_x, y=final_y, rotation=0.0,
+                            z_order=placed_count,
+                            auto_x=final_x, auto_y=final_y, auto_rotation=0.0,
+                        )
+                        placements[uid] = p
+                        placed_count += 1
+                        log.info("Template matched %s in %s (corr=%.2f, scale=%.0f%%)",
+                                 uid[:6], best_slot, best_val, best_tmpl_scale * 100)
+                    else:
+                        still_unplaced.append((uid, gx, gy, gr))
+                except Exception as e:
+                    log.debug("Template match failed for %s: %s", uid[:6], e)
+                    still_unplaced.append((uid, gx, gy, gr))
+
+            odds_and_ends = still_unplaced
+            log.info("Template matching rescued %d images from Odds & Ends",
+                     len(still_unplaced) - len(odds_and_ends)
+                     if len(still_unplaced) < len(odds_and_ends) else 0)
 
         # ── 5. Odds & Ends tray — place unmatched below the composition ──────
         fallback_count = len(odds_and_ends)
