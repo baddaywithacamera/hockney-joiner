@@ -47,7 +47,9 @@ from typing import Optional
 import numpy as np
 from PyQt6.QtCore import Qt, QRectF, QPropertyAnimation, QPointF, QEasingCurve, pyqtSignal
 from PyQt6.QtGui import (
+    QBrush,
     QColor,
+    QCursor,
     QFont,
     QImage,
     QKeyEvent,
@@ -60,7 +62,9 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGraphicsEllipseItem,
     QGraphicsItem,
+    QGraphicsLineItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
@@ -284,6 +288,112 @@ class CommandStack:
         return snap
 
 
+# ── Rotation handle ────────────────────────────────────────────────────────────
+
+HANDLE_RADIUS = 7
+HANDLE_OFFSET = 20   # px above top-centre of image
+HANDLE_COLOR = QColor(255, 140, 0)        # orange
+HANDLE_COLOR_HOVER = QColor(255, 180, 50)
+STEM_COLOR = QColor(255, 140, 0, 160)
+
+
+class RotationHandle(QGraphicsEllipseItem):
+    """
+    Draggable orange circle above the image — drag to rotate.
+    Child item of PhotoItem so it moves/hides with the parent.
+    """
+
+    def __init__(self, parent_photo: "PhotoItem"):
+        r = HANDLE_RADIUS
+        super().__init__(-r, -r, 2 * r, 2 * r, parent_photo)
+        self._photo = parent_photo
+        self._dragging = False
+        self._start_angle = 0.0
+
+        self.setBrush(QBrush(HANDLE_COLOR))
+        self.setPen(QPen(Qt.GlobalColor.white, 1.5))
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self.setAcceptHoverEvents(True)
+        self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+        self.setZValue(1000)  # always on top within the parent
+        self.setVisible(False)  # only visible when parent is active
+
+        # Stem line connecting handle to image top-centre
+        self._stem = QGraphicsLineItem(parent_photo)
+        self._stem.setPen(QPen(STEM_COLOR, 1.5, Qt.PenStyle.DashLine))
+        self._stem.setZValue(999)
+        self._stem.setVisible(False)
+
+        self._reposition()
+
+    def _reposition(self):
+        """Place handle above the top-centre of the parent pixmap."""
+        pm = self._photo.pixmap()
+        cx = pm.width() / 2
+        self.setPos(cx, -HANDLE_OFFSET)
+        self._stem.setLine(cx, 0, cx, -HANDLE_OFFSET)
+
+    def show_handle(self):
+        self._reposition()
+        self.setVisible(True)
+        self._stem.setVisible(True)
+
+    def hide_handle(self):
+        self.setVisible(False)
+        self._stem.setVisible(False)
+
+    def hoverEnterEvent(self, event):
+        self.setBrush(QBrush(HANDLE_COLOR_HOVER))
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.setBrush(QBrush(HANDLE_COLOR))
+        super().hoverLeaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._start_angle = self._photo.placement.rotation
+            # Capture the initial mouse angle relative to image centre
+            scene_pos = event.scenePos()
+            centre = self._photo.mapToScene(self._photo.transformOriginPoint())
+            self._start_mouse_angle = math.degrees(
+                math.atan2(scene_pos.y() - centre.y(), scene_pos.x() - centre.x())
+            )
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            scene_pos = event.scenePos()
+            centre = self._photo.mapToScene(self._photo.transformOriginPoint())
+            current_angle = math.degrees(
+                math.atan2(scene_pos.y() - centre.y(), scene_pos.x() - centre.x())
+            )
+            delta = current_angle - self._start_mouse_angle
+            new_rot = self._start_angle + delta
+            self._photo.placement.rotation = new_rot
+            self._photo.setRotation(new_rot)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            self._photo.read_back_placement()
+            # Push undo via the TrayView
+            view = self._photo.scene().views()[0] if self._photo.scene() else None
+            if isinstance(view, TrayView):
+                snap = view._snapshot_one(self._photo.image_id)
+                view._commands.push([snap])
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+
 # ── Graphics item ──────────────────────────────────────────────────────────────
 
 class PhotoItem(QGraphicsPixmapItem):
@@ -301,6 +411,9 @@ class PhotoItem(QGraphicsPixmapItem):
         self.setAcceptHoverEvents(True)
         self._apply_placement()
 
+        # Rotation drag handle (hidden by default, shown when activated)
+        self._rotation_handle = RotationHandle(self)
+
     def _apply_placement(self):
         self.setPos(self.placement.x, self.placement.y)
         self.setRotation(self.placement.rotation)
@@ -313,6 +426,12 @@ class PhotoItem(QGraphicsPixmapItem):
         self.placement.y = pos.y()
         self.placement.rotation = self.rotation()
         self.placement.z_order = int(self.zValue())
+
+    def show_rotation_handle(self):
+        self._rotation_handle.show_handle()
+
+    def hide_rotation_handle(self):
+        self._rotation_handle.hide_handle()
 
     def hoverEnterEvent(self, event):
         # Brighten border on hover via opacity trick on siblings (handled in TrayView)
@@ -467,7 +586,10 @@ class TrayView(QGraphicsView):
         or after 30 seconds.
         """
         from PyQt6.QtCore import QTimer
-        sorted_p = sorted(self._placements.values(), key=lambda p: p.z_order)
+        sorted_p = sorted(
+            (p for p in self._placements.values() if p.image_id not in self._removed_ids),
+            key=lambda p: p.z_order,
+        )
         self._highlighted_ids = set()
         for idx in one_based_indices:
             if 1 <= idx <= len(sorted_p):
@@ -502,24 +624,37 @@ class TrayView(QGraphicsView):
     def render_contact_sheet(self) -> Optional["Image"]:
         """Render a numbered contact sheet for moondream analysis."""
         from hockney.core.export import render_contact_sheet
-        placements = list(self._placements.values())
+        placements = self.all_placements()
         if not placements:
             return None
         return render_contact_sheet(placements, self.store)
 
     def all_placements(self) -> list[ImagePlacement]:
-        return list(self._placements.values())
+        """Return placements for visible (non-removed) images only."""
+        return [p for p in self._placements.values()
+                if p.image_id not in self._removed_ids]
 
     # ── Activation ─────────────────────────────────────────────────────────────
 
     def _activate(self, image_id: str):
+        # Hide handle on previously active image
+        if self._active_id and self._active_id in self._items:
+            self._items[self._active_id].hide_rotation_handle()
+
         self._active_id = image_id
         # Dim everything else, full opacity on active
         for iid, item in self._items.items():
             item.setOpacity(1.0 if iid == image_id else 0.45)
+
+        # Show rotation handle on newly active image
+        if image_id in self._items:
+            self._items[image_id].show_rotation_handle()
         self.image_activated.emit(image_id)
 
     def _deactivate_all(self):
+        # Hide rotation handle on previously active image
+        if self._active_id and self._active_id in self._items:
+            self._items[self._active_id].hide_rotation_handle()
         self._active_id = None
         for item in self._items.values():
             item.setOpacity(1.0)

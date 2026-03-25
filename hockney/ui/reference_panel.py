@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QSettings, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -86,12 +86,17 @@ class _SlotWidget(QWidget):
         layout.addLayout(info_col, stretch=1)
 
     def _on_load(self):
+        # Remember last directory across sessions via QSettings
+        settings = QSettings("HockneyJoiner", "HockneyJoiner")
+        last_dir = settings.value("last_image_dir", "", type=str)
+
         path, _ = QFileDialog.getOpenFileName(
             self, f"Load Reference — {SLOT_LABELS.get(self.slot_name, self.slot_name)}",
-            "",
+            last_dir,
             "Images (*.jpg *.jpeg *.png *.tif *.tiff *.cr2 *.cr3 *.nef *.arw *.dng)",
         )
         if path:
+            settings.setValue("last_image_dir", str(Path(path).parent))
             self.set_image(path)
             self.loaded.emit(self.slot_name, path)
 
