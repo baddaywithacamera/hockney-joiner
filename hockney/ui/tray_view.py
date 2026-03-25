@@ -806,20 +806,26 @@ class TrayView(QGraphicsView):
 
     # ── Deal Mode ──────────────────────────────────────────────────────────────
 
-    def enter_deal_mode(self):
+    def enter_deal_mode(self, skip_dialog: bool = False):
         """
         Enter Deal Mode: hide all images, prepare a filename-sorted queue,
         and wait for spacebar taps to reveal them one by one.
+
+        skip_dialog: if True, skip the EXIF override dialog (used when
+                     auto-entering after placement).
         """
         records = self.store.all_records()
         if not records:
             return
 
-        # Show batch-info dialog (Cancel aborts entry)
-        dlg = DealModeDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._deal_exif_override = dlg.get_overrides()
+        if not skip_dialog:
+            # Show batch-info dialog (Cancel aborts entry)
+            dlg = DealModeDialog(self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            self._deal_exif_override = dlg.get_overrides()
+        else:
+            self._deal_exif_override = {}
 
         # Sort by filename (cameras number sequentially)
         records_sorted = sorted(records, key=lambda r: r.source_path.name.lower())
@@ -846,6 +852,8 @@ class TrayView(QGraphicsView):
 
         self.deal_mode_changed.emit(True)
         self._update_status_for_deal()
+        # Grab keyboard focus so spacebar reaches keyPressEvent
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
         log.info("Deal Mode entered: %d images queued", len(self._deal_queue))
 
     def exit_deal_mode(self):

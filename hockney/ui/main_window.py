@@ -363,6 +363,19 @@ class MainWindow(QMainWindow):
         folder = str(path if path.is_dir() else path.parent)
         settings.setValue("last_image_dir", folder)
 
+    def _last_project_dir(self) -> str:
+        """Return the last directory used for project open/save, or empty string."""
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("HockneyJoiner", "Hockney Joiner")
+        return settings.value("last_project_dir", "", type=str)
+
+    def _save_project_dir(self, path: Path):
+        """Persist the project directory so next open/save starts there."""
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("HockneyJoiner", "Hockney Joiner")
+        folder = str(path if path.is_dir() else path.parent)
+        settings.setValue("last_project_dir", folder)
+
     def load_folder(self):
         folder = QFileDialog.getExistingDirectory(
             self, "Select Image Folder", self._last_image_dir()
@@ -470,22 +483,32 @@ class MainWindow(QMainWindow):
         self.process_btn.setEnabled(True)
         self._update_status(result.message)
 
+        # Auto-enter deal mode after placement so user can review
+        # images one by one and adjust positions
+        if result.placements and self.store.count() > 0:
+            self.tray_view.enter_deal_mode(skip_dialog=True)
+
     def _on_placement_error(self, msg: str, dlg):
         dlg.close()
         self.process_btn.setEnabled(True)
         QMessageBox.critical(self, "Placement Error", msg)
 
     def _on_process_requested(self, settings: dict):
+        # Update matching engine from sidebar selector
+        engine = settings.get("matching_engine", "auto")
+        if self._project_config:
+            self._project_config.matching_engine = engine
         self.auto_place()
 
     # ── Project ────────────────────────────────────────────────────────────────
 
     def open_project(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Project", "", "Hockney Project (*.json)"
+            self, "Open Project", self._last_project_dir(), "Hockney Project (*.json)"
         )
         if not path:
             return
+        self._save_project_dir(Path(path))
 
         from hockney.core.project import load_project
         result = load_project(Path(path), self.store)
@@ -513,11 +536,15 @@ class MainWindow(QMainWindow):
         self._update_status(f"Opened: {Path(path).name}")
 
     def save_project(self):
+        default_name = self._last_project_dir() or "joiner.json"
+        if not default_name.endswith(".json"):
+            default_name = str(Path(default_name) / "joiner.json")
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Project", "joiner.json", "Hockney Project (*.json)"
+            self, "Save Project", default_name, "Hockney Project (*.json)"
         )
         if not path:
             return
+        self._save_project_dir(Path(path))
 
         from hockney.core.project import save_project
         save_project(

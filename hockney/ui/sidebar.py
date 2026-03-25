@@ -128,9 +128,32 @@ class Sidebar(QWidget):
 
         layout.addWidget(surface_group)
 
+        # ── Matching engine selector ─────────────────────────────────────────
+        engine_group = QGroupBox("Matching Engine")
+        engine_layout = QVBoxLayout(engine_group)
+        self.engine_combo = QComboBox()
+        self.engine_combo.addItems([
+            "Auto (try all, keep best)",
+            "DISK + LightGlue (GPU)",
+            "SuperPoint + LightGlue (GPU)",
+            "ALIKED + LightGlue (GPU)",
+            "SIFT (CPU)",
+            "ORB (CPU, fast)",
+        ])
+        self.engine_combo.setToolTip(
+            "Auto tries each engine and keeps the best result.\n"
+            "DISK: learned blob features, good all-rounder.\n"
+            "SuperPoint: structural edges and corners.\n"
+            "ALIKED: adaptive descriptors, handles varied textures.\n"
+            "SIFT: classic, scale-invariant, CPU only.\n"
+            "ORB: very fast, good for strong corners/edges."
+        )
+        engine_layout.addWidget(self.engine_combo)
+        layout.addWidget(engine_group)
+
         # ── Process button ────────────────────────────────────────────────────
         self.process_btn = QPushButton("Auto-Place")
-        self.process_btn.setToolTip("Run LightGlue feature matching and place images.")
+        self.process_btn.setToolTip("Run feature matching and place images on the reference.")
         self.process_btn.clicked.connect(self._on_process_clicked)
         layout.addWidget(self.process_btn)
 
@@ -161,12 +184,27 @@ class Sidebar(QWidget):
         self._tile_label.setText(f"{snapped} px")
         self.store.thumb_long_edge = snapped
 
+    # Engine combo index → config key mapping
+    _ENGINE_MAP = {
+        0: "auto",
+        1: "disk_lightglue",
+        2: "superpoint",
+        3: "aliked",
+        4: "sift",
+        5: "orb",
+    }
+
+    def selected_engine(self) -> str:
+        """Return the matching_engine key for ProjectConfig."""
+        return self._ENGINE_MAP.get(self.engine_combo.currentIndex(), "auto")
+
     def _on_process_clicked(self):
         settings = {
             "histogram_eq": self.eq_checkbox.isChecked(),
             "filter": self.filter_combo.currentText(),
             "surface_effect": self.surface_combo.currentText(),
             "surface_intensity": self.intensity_slider.value(),
+            "matching_engine": self.selected_engine(),
         }
         self.process_requested.emit(settings)
 

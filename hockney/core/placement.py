@@ -179,8 +179,24 @@ class PlacementWorker(QThread):
         """
         from hockney.core.placement_log import PlacementLog
 
-        if engine == "sift":
+        if engine == "orb":
+            return self._place_with_orb(records, plog)
+        elif engine == "sift":
             return self._place_with_sift(records, plog)
+        elif engine == "superpoint":
+            if self.model_ready:
+                return self._place_with_references(records, plog,
+                                                    feature_type="superpoint")
+            else:
+                log.warning("SuperPoint requested but model not ready, using SIFT")
+                return self._place_with_sift(records, plog)
+        elif engine == "aliked":
+            if self.model_ready:
+                return self._place_with_references(records, plog,
+                                                    feature_type="aliked")
+            else:
+                log.warning("ALIKED requested but model not ready, using SIFT")
+                return self._place_with_sift(records, plog)
         elif engine == "disk_lightglue":
             if self.model_ready:
                 return self._place_with_references(records, plog)
@@ -188,50 +204,51 @@ class PlacementWorker(QThread):
                 log.warning("DISK+LightGlue requested but model not ready, using SIFT")
                 return self._place_with_sift(records, plog)
         else:
-            # "auto" — try DISK+LightGlue and SIFT, keep the better result
-            disk_result = None
+            # "auto" — try DISK, SuperPoint, and SIFT. Best placement count wins.
+            candidates = []  # (name, result, placed_count)
 
             if self.model_ready:
+                # Try DISK+LightGlue
                 disk_result = self._place_with_references(records, plog=None)
                 disk_placed = len(records) - disk_result.fallback_count
-                disk_rate = disk_placed / max(len(records), 1)
-                log.info("DISK+LightGlue: %.0f%% placed (%d/%d)",
-                         disk_rate * 100, disk_placed, len(records))
+                log.info("DISK+LightGlue: %d/%d placed", disk_placed, len(records))
+                candidates.append(("disk_lightglue", disk_result, disk_placed))
 
-                if disk_rate >= 0.7:
+                # Early exit if DISK nailed it
+                if disk_placed / max(len(records), 1) >= 0.9:
                     plog.set_engine("disk_lightglue")
                     plog.set_counts(len(records), disk_placed,
                                     disk_result.fallback_count)
-                    plog.set_notes(f"DISK accepted at {disk_rate*100:.0f}%")
+                    plog.set_notes(f"DISK accepted at {disk_placed}/{len(records)}")
                     plog.flush()
                     return disk_result
+
+                # Try SuperPoint+LightGlue
+                self.progress.emit(0)
+                sp_result = self._place_with_references(
+                    records, plog=None, feature_type="superpoint")
+                sp_placed = len(records) - sp_result.fallback_count
+                log.info("SuperPoint+LightGlue: %d/%d placed", sp_placed, len(records))
+                candidates.append(("superpoint", sp_result, sp_placed))
 
             # Try SIFT
             self.progress.emit(0)
             sift_result = self._place_with_sift(records, plog=None)
             sift_placed = len(records) - sift_result.fallback_count
-            sift_rate = sift_placed / max(len(records), 1)
-            log.info("SIFT: %.0f%% placed (%d/%d)",
-                     sift_rate * 100, sift_placed, len(records))
+            log.info("SIFT: %d/%d placed", sift_placed, len(records))
+            candidates.append(("sift", sift_result, sift_placed))
 
-            # Pick the winner
-            if disk_result:
-                disk_placed = len(records) - disk_result.fallback_count
-                if disk_placed >= sift_placed:
-                    plog.set_engine("disk_lightglue (auto-winner)")
-                    plog.set_counts(len(records), disk_placed,
-                                    disk_result.fallback_count)
-                    plog.set_notes(f"DISK won: {disk_placed}/{len(records)} vs SIFT {sift_placed}/{len(records)}")
-                    plog.flush()
-                    return disk_result
-
-            # SIFT won (or DISK wasn't available)
-            plog.set_engine("sift (auto-winner)")
-            plog.set_counts(len(records), sift_placed,
-                            sift_result.fallback_count)
-            plog.set_notes(f"SIFT won: {sift_placed}/{len(records)}")
+            # Pick the winner — highest placed count
+            winner_name, winner_result, winner_placed = max(
+                candidates, key=lambda c: c[2])
+            rates = ", ".join(f"{n}={p}/{len(records)}" for n, _, p in candidates)
+            plog.set_engine(f"{winner_name} (auto-winner)")
+            plog.set_counts(len(records), winner_placed,
+                            len(records) - winner_placed)
+            plog.set_notes(f"Auto: {rates}. Winner: {winner_name}")
             plog.flush()
-            return sift_result
+            log.info("Auto winner: %s (%s)", winner_name, rates)
+            return winner_result
 
     def _place_with_sift(self, records, plog) -> PlacementResult:
         """Run the SIFT engine and wrap results into a PlacementResult."""
@@ -355,6 +372,70 @@ class PlacementWorker(QThread):
         # Log results
         if plog:
             plog.set_engine("loftr")
+            plog.set_counts(total, placed_count, fallback_count)
+            plog.merge_image_stats(log_data)
+            plog.flush()
+
+        log.info(msg)
+        return PlacementResult(
+            placements=result_list,
+            used_lightglue=False,
+            fallback_count=fallback_count,
+            message=msg,
+        )
+
+    def _place_with_orb(self, records, plog) -> PlacementResult:
+        """Run the ORB engine and wrap results into a PlacementResult."""
+        from hockney.core.placement_orb import place_with_orb
+
+        placements, odds_and_ends, placed_count, log_data = place_with_orb(
+            store=self.store,
+            config=self.config,
+            records=records,
+            thumb_edge=self._thumb_edge,
+            min_matches=self._min_matches,
+            min_matches_relaxed=MIN_MATCHES_RELAXED,
+            progress_cb=lambda pct: self.progress.emit(pct),
+            cancel_check=lambda: self._cancelled,
+        )
+
+        if self._cancelled:
+            return self._place_grid(records)
+
+        # Template matching fallback for remaining unplaced
+        if odds_and_ends:
+            placements, odds_and_ends, placed_count = self._template_fallback(
+                records, placements, odds_and_ends, placed_count,
+            )
+
+        # Spread overlaps
+        _spread_overlaps(placements, self._thumb_edge, OVERLAP_REPEL, OVERLAP_THRESHOLD)
+
+        # Odds & Ends tray
+        fallback_count = len(odds_and_ends)
+        if odds_and_ends:
+            placed_ys = [p.y for p in placements.values()] or [0.0]
+            tray_y = max(placed_ys) + self._thumb_edge + GRID_PADDING * 4
+            for i, (uid, gx, gy, gr) in enumerate(odds_and_ends):
+                p = ImagePlacement(
+                    image_id=uid,
+                    x=float(i * (self._thumb_edge + GRID_PADDING)),
+                    y=tray_y, rotation=0.0,
+                    z_order=placed_count + i,
+                    auto_x=gx, auto_y=gy, auto_rotation=gr,
+                )
+                placements[uid] = p
+
+        self.progress.emit(100)
+
+        result_list = list(placements.values())
+        total = len(records)
+        msg = f"ORB placed {placed_count}/{total} images."
+        if fallback_count:
+            msg += f" {fallback_count} in Odds & Ends tray."
+
+        if plog:
+            plog.set_engine("orb")
             plog.set_counts(total, placed_count, fallback_count)
             plog.merge_image_stats(log_data)
             plog.flush()
@@ -555,16 +636,25 @@ class PlacementWorker(QThread):
 
     # ── Reference-based placement ───────────────────────────────────────────
 
-    def _place_with_references(self, records, plog=None) -> PlacementResult:
+    def _place_with_references(self, records, plog=None,
+                               feature_type: str = "disk") -> PlacementResult:
         """
         Match each detail photo against reference images (the puzzle box lid).
         Each detail gets an absolute position — no BFS chain, no error accumulation.
+
+        feature_type: "disk", "superpoint", or "aliked" — selects extractor + matcher.
         """
         try:
             import torch
-            from lightglue import LightGlue, DISK
             import numpy as np
             import cv2
+            from lightglue import LightGlue
+            if feature_type == "superpoint":
+                from lightglue import SuperPoint
+            elif feature_type == "aliked":
+                from lightglue import ALIKED
+            else:
+                from lightglue import DISK
         except ImportError as e:
             log.warning("LightGlue import failed (%s) — falling back to grid", e)
             return self._place_grid(records)
@@ -572,10 +662,17 @@ class PlacementWorker(QThread):
         from PIL import Image as PILImage
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        log.info("Reference-based placement on device: %s", device)
+        log.info("Reference-based placement (%s) on device: %s", feature_type, device)
 
-        extractor = DISK(max_num_keypoints=self._max_kp).eval().to(device)
-        matcher = LightGlue(features="disk").eval().to(device)
+        if feature_type == "superpoint":
+            extractor = SuperPoint(max_num_keypoints=self._max_kp).eval().to(device)
+            matcher = LightGlue(features="superpoint").eval().to(device)
+        elif feature_type == "aliked":
+            extractor = ALIKED(max_num_keypoints=self._max_kp).eval().to(device)
+            matcher = LightGlue(features="aliked").eval().to(device)
+        else:
+            extractor = DISK(max_num_keypoints=self._max_kp).eval().to(device)
+            matcher = LightGlue(features="disk").eval().to(device)
 
         refs = self.config.references
         n_refs = len(refs)
