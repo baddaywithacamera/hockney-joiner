@@ -74,7 +74,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menus()
         self._build_toolbar()
+        self._restore_layout()
         self._connect_signals()
+
+        # Prompt for a new project on startup
+        QTimer.singleShot(300, self._prompt_new_project)
 
         if download_model_on_open:
             QTimer.singleShot(500, self._start_model_download)
@@ -128,25 +132,6 @@ class MainWindow(QMainWindow):
             )
         else:
             self._chat_dock = None
-
-        # ── Restore saved dock/window layout ──────────────────────────────────
-        # Version-stamped so stale layouts from before the dock migration
-        # are silently discarded rather than corrupting the toolbar position.
-        _LAYOUT_VERSION = 3
-        from PyQt6.QtCore import QSettings
-        settings = QSettings("HockneyJoiner", "Hockney Joiner")
-        if settings.value("layout_version", 0, type=int) == _LAYOUT_VERSION:
-            geometry = settings.value("window_geometry")
-            state = settings.value("window_state")
-            if geometry:
-                self.restoreGeometry(geometry)
-            if state:
-                self.restoreState(state)
-        else:
-            # Wipe stale layout data
-            settings.remove("window_geometry")
-            settings.remove("window_state")
-            settings.setValue("layout_version", _LAYOUT_VERSION)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -288,8 +273,10 @@ class MainWindow(QMainWindow):
 
     def _build_toolbar(self):
         toolbar = QToolBar("Main Toolbar")
+        toolbar.setObjectName("main_toolbar")
         toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+        self._main_toolbar = toolbar
 
         load_btn = QAction("Load Folder…", self)
         load_btn.triggered.connect(self.load_folder)
@@ -311,6 +298,27 @@ class MainWindow(QMainWindow):
         export_btn = QAction("Export…", self)
         export_btn.triggered.connect(self.export)
         toolbar.addAction(export_btn)
+
+    def _restore_layout(self):
+        """Restore saved window geometry and dock layout, then force toolbar to top."""
+        _LAYOUT_VERSION = 4
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("HockneyJoiner", "Hockney Joiner")
+        if settings.value("layout_version", 0, type=int) == _LAYOUT_VERSION:
+            geometry = settings.value("window_geometry")
+            state = settings.value("window_state")
+            if geometry:
+                self.restoreGeometry(geometry)
+            if state:
+                self.restoreState(state)
+        else:
+            settings.remove("window_geometry")
+            settings.remove("window_state")
+            settings.setValue("layout_version", _LAYOUT_VERSION)
+
+        # Always force the toolbar to the top — restoreState can misplace it
+        if hasattr(self, '_main_toolbar'):
+            self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._main_toolbar)
 
     def _connect_signals(self):
         self.sidebar.process_requested.connect(self._on_process_requested)
@@ -635,6 +643,12 @@ class MainWindow(QMainWindow):
 
     # ── Project config ──────────────────────────────────────────────────────
 
+    def _prompt_new_project(self):
+        """Show New Project dialog on startup if no project is loaded."""
+        if self._project_config is not None:
+            return
+        self._new_project()
+
     def _new_project(self):
         from hockney.ui.new_project_dialog import NewProjectDialog
         dlg = NewProjectDialog(self)
@@ -777,7 +791,7 @@ class MainWindow(QMainWindow):
         # user left them — including on secondary monitors
         from PyQt6.QtCore import QSettings
         settings = QSettings("HockneyJoiner", "Hockney Joiner")
-        settings.setValue("layout_version", 3)
+        settings.setValue("layout_version", 4)
         settings.setValue("window_geometry", self.saveGeometry())
         settings.setValue("window_state", self.saveState())
         event.accept()
