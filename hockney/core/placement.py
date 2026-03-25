@@ -40,9 +40,9 @@ MIN_MATCHES = 8         # minimum RANSAC inlier pairs to trust a placement
 MIN_MATCHES_RELAXED = 5 # second-pass threshold for stragglers
 MAX_KEYPOINTS = 2048    # per image, for DISK
 RANSAC_REPROJ = 5.0     # RANSAC reprojection threshold (px) for reference matching
-OVERLAP_REPEL = 0.15    # fraction of tile size to nudge overlapping tiles apart
+OVERLAP_REPEL = 0.25    # fraction of tile size to nudge overlapping tiles apart
                         # (lower = tighter shingling, more Hockney-like)
-OVERLAP_THRESHOLD = 0.35  # centres closer than this fraction of tile_size → overlapping
+OVERLAP_THRESHOLD = 0.6   # centres closer than this fraction of tile_size → overlapping
 
 # Subject-type tuning overrides
 SUBJECT_TUNING = {
@@ -56,6 +56,50 @@ SUBJECT_TUNING = {
     "building":   {"max_keypoints": 2048, "min_matches": 10},
     "person":     {"max_keypoints": 2048, "min_matches": 8},
 }
+
+
+def _homography_center(inlier_det, inlier_ref, dw, dh, ref_w, ref_h,
+                       ransac_reproj=5.0, margin=0.2):
+    """
+    Map detail image center through homography to find where it lands on the reference.
+    Returns (cx, cy) or None if the homography is degenerate or lands way outside bounds.
+
+    `margin` allows placement up to margin*ref_size beyond the reference edge
+    (photos near edges legitimately hang over).
+    """
+    import cv2
+    import numpy as np
+
+    if len(inlier_det) < 4:
+        return None
+
+    H, _ = cv2.findHomography(
+        inlier_det.reshape(-1, 1, 2).astype(np.float32),
+        inlier_ref.reshape(-1, 1, 2).astype(np.float32),
+        cv2.RANSAC, ransac_reproj,
+    )
+    if H is not None:
+        det_center = np.array([[[dw / 2.0, dh / 2.0]]], dtype=np.float32)
+        ref_point = cv2.perspectiveTransform(det_center, H)
+        cx = float(ref_point[0, 0, 0])
+        cy = float(ref_point[0, 0, 1])
+
+        # Sanity check — reject if way outside reference bounds
+        margin_x = ref_w * margin
+        margin_y = ref_h * margin
+        if (cx < -margin_x or cx > ref_w + margin_x or
+                cy < -margin_y or cy > ref_h + margin_y):
+            log.debug("Homography projected to (%.0f, %.0f) — outside ref %dx%d, rejecting",
+                      cx, cy, ref_w, ref_h)
+            # Fall back to inlier centroid
+            cx = float(inlier_ref[:, 0].mean())
+            cy = float(inlier_ref[:, 1].mean())
+        return (cx, cy)
+    else:
+        # Fallback to inlier centroid
+        cx = float(inlier_ref[:, 0].mean())
+        cy = float(inlier_ref[:, 1].mean())
+        return (cx, cy)
 
 
 @dataclass
@@ -144,47 +188,49 @@ class PlacementWorker(QThread):
                 log.warning("DISK+LightGlue requested but model not ready, using SIFT")
                 return self._place_with_sift(records, plog)
         else:
-            # "auto" — try both, keep the better result
-            # Try DISK+LightGlue first if model is ready
+            # "auto" — try DISK+LightGlue and SIFT, keep the better result
             disk_result = None
-            sift_result = None
 
             if self.model_ready:
                 disk_result = self._place_with_references(records, plog=None)
-                disk_rate = (len(records) - disk_result.fallback_count) / max(len(records), 1)
+                disk_placed = len(records) - disk_result.fallback_count
+                disk_rate = disk_placed / max(len(records), 1)
                 log.info("DISK+LightGlue: %.0f%% placed (%d/%d)",
-                         disk_rate * 100, len(records) - disk_result.fallback_count, len(records))
+                         disk_rate * 100, disk_placed, len(records))
 
                 if disk_rate >= 0.7:
-                    # Good enough — log and return
                     plog.set_engine("disk_lightglue")
-                    plog.set_counts(len(records),
-                                    len(records) - disk_result.fallback_count,
+                    plog.set_counts(len(records), disk_placed,
                                     disk_result.fallback_count)
                     plog.set_notes(f"DISK accepted at {disk_rate*100:.0f}%")
                     plog.flush()
                     return disk_result
 
-            # Try SIFT (either as fallback or primary)
-            self.progress.emit(0)  # reset progress for second pass
-            sift_result = self._place_with_sift(records, plog)
-            sift_rate = (len(records) - sift_result.fallback_count) / max(len(records), 1)
+            # Try SIFT
+            self.progress.emit(0)
+            sift_result = self._place_with_sift(records, plog=None)
+            sift_placed = len(records) - sift_result.fallback_count
+            sift_rate = sift_placed / max(len(records), 1)
             log.info("SIFT: %.0f%% placed (%d/%d)",
-                     sift_rate * 100, len(records) - sift_result.fallback_count, len(records))
+                     sift_rate * 100, sift_placed, len(records))
 
             # Pick the winner
             if disk_result:
-                disk_rate = (len(records) - disk_result.fallback_count) / max(len(records), 1)
-                if disk_rate >= sift_rate:
+                disk_placed = len(records) - disk_result.fallback_count
+                if disk_placed >= sift_placed:
                     plog.set_engine("disk_lightglue (auto-winner)")
-                    plog.set_counts(len(records),
-                                    len(records) - disk_result.fallback_count,
+                    plog.set_counts(len(records), disk_placed,
                                     disk_result.fallback_count)
-                    plog.set_notes(f"DISK won: {disk_rate*100:.0f}% vs SIFT {sift_rate*100:.0f}%")
+                    plog.set_notes(f"DISK won: {disk_placed}/{len(records)} vs SIFT {sift_placed}/{len(records)}")
                     plog.flush()
                     return disk_result
 
             # SIFT won (or DISK wasn't available)
+            plog.set_engine("sift (auto-winner)")
+            plog.set_counts(len(records), sift_placed,
+                            sift_result.fallback_count)
+            plog.set_notes(f"SIFT won: {sift_placed}/{len(records)}")
+            plog.flush()
             return sift_result
 
     def _place_with_sift(self, records, plog) -> PlacementResult:
@@ -240,6 +286,75 @@ class PlacementWorker(QThread):
         # Log results
         if plog:
             plog.set_engine("sift")
+            plog.set_counts(total, placed_count, fallback_count)
+            plog.merge_image_stats(log_data)
+            plog.flush()
+
+        log.info(msg)
+        return PlacementResult(
+            placements=result_list,
+            used_lightglue=False,
+            fallback_count=fallback_count,
+            message=msg,
+        )
+
+    def _place_with_loftr(self, records, plog) -> PlacementResult:
+        """Run the LoFTR dense matching engine and wrap results into a PlacementResult."""
+        try:
+            from hockney.core.placement_loftr import place_with_loftr
+        except ImportError as e:
+            log.warning("LoFTR import failed (%s), falling back to SIFT", e)
+            return self._place_with_sift(records, plog)
+
+        placements, odds_and_ends, placed_count, log_data = place_with_loftr(
+            store=self.store,
+            config=self.config,
+            records=records,
+            thumb_edge=self._thumb_edge,
+            min_matches=self._min_matches,
+            min_matches_relaxed=MIN_MATCHES_RELAXED,
+            progress_cb=lambda pct: self.progress.emit(pct),
+            cancel_check=lambda: self._cancelled,
+        )
+
+        if self._cancelled:
+            return self._place_grid(records)
+
+        # Template matching fallback for remaining unplaced
+        if odds_and_ends:
+            placements, odds_and_ends, placed_count = self._template_fallback(
+                records, placements, odds_and_ends, placed_count,
+            )
+
+        # Spread overlaps
+        _spread_overlaps(placements, self._thumb_edge, OVERLAP_REPEL, OVERLAP_THRESHOLD)
+
+        # Odds & Ends tray
+        fallback_count = len(odds_and_ends)
+        if odds_and_ends:
+            placed_ys = [p.y for p in placements.values()] or [0.0]
+            tray_y = max(placed_ys) + self._thumb_edge + GRID_PADDING * 4
+            for i, (uid, gx, gy, gr) in enumerate(odds_and_ends):
+                p = ImagePlacement(
+                    image_id=uid,
+                    x=float(i * (self._thumb_edge + GRID_PADDING)),
+                    y=tray_y, rotation=0.0,
+                    z_order=placed_count + i,
+                    auto_x=gx, auto_y=gy, auto_rotation=gr,
+                )
+                placements[uid] = p
+
+        self.progress.emit(100)
+
+        result_list = list(placements.values())
+        total = len(records)
+        msg = f"LoFTR placed {placed_count}/{total} images."
+        if fallback_count:
+            msg += f" {fallback_count} in Odds & Ends tray."
+
+        # Log results
+        if plog:
+            plog.set_engine("loftr")
             plog.set_counts(total, placed_count, fallback_count)
             plog.merge_image_stats(log_data)
             plog.flush()
@@ -485,9 +600,8 @@ class PlacementWorker(QThread):
                 ref_sizes[ref.slot] = (new_w, new_h)
 
                 arr = np.array(pil)
-                # CLAHE contrast boost before feature extraction
-                from hockney.core.placement_sift import clahe_preprocess
-                arr = clahe_preprocess(arr, clip_limit=3.0)
+                # No CLAHE for DISK references — DISK works better on
+                # natural tones; CLAHE distorts the feature space
                 tensor = _arr_to_tensor(arr, device)
                 with torch.no_grad():
                     feats = extractor.extract(tensor)
@@ -532,10 +646,12 @@ class PlacementWorker(QThread):
                 if preview_arr is None:
                     continue
 
-                # Light denoise + CLAHE contrast boost
-                from hockney.core.placement_sift import clahe_preprocess, light_denoise
-                preview_arr = light_denoise(preview_arr, h=3)
-                preview_arr = clahe_preprocess(preview_arr, clip_limit=3.0)
+                # Light denoise only for DISK path — CLAHE hurts DISK
+                # by flattening the tonal range that DISK uses for descriptors
+                import cv2 as cv2_pre
+                preview_arr = cv2_pre.fastNlMeansDenoisingColored(
+                    preview_arr, None, 3, 3, 7, 21,
+                )
 
                 h_full, w_full = preview_arr.shape[:2]
                 scales_feats = []
@@ -592,6 +708,7 @@ class PlacementWorker(QThread):
             best_inliers = 0
             best_ref_centroid = None
             best_rot = 0.0
+            best_detail_size = (0, 0)
 
             for slot, ref_feat in ref_features.items():
                 for ds, det_feat, (dw, dh) in detail_multiscale[record.id]:
@@ -629,16 +746,23 @@ class PlacementWorker(QThread):
                         n_inliers = int(inlier_idx.sum())
 
                         if n_inliers > best_inliers and n_inliers >= self._min_matches:
-                            # Centroid from RANSAC inliers only
+                            inlier_det = m_kp_det[inlier_idx]
                             inlier_ref = m_kp_ref[inlier_idx]
-                            cx = float(inlier_ref[:, 0].mean())
-                            cy = float(inlier_ref[:, 1].mean())
+
+                            rw, rh = ref_sizes.get(slot, (PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE))
+                            center = _homography_center(
+                                inlier_det, inlier_ref, dw, dh, rw, rh)
+                            if center is None:
+                                continue
+                            cx, cy = center
+
                             rot = math.degrees(math.atan2(M[1, 0], M[0, 0]))
 
                             best_slot = slot
                             best_inliers = n_inliers
                             best_ref_centroid = (cx, cy)
                             best_rot = rot
+                            best_detail_size = (dw, dh)
                     except Exception as e:
                         log.debug("Match %s↔%s@%.0f%% failed: %s",
                                   slot, record.id[:6], ds * 100, e)
@@ -927,24 +1051,40 @@ class PlacementWorker(QThread):
 
 def _spread_overlaps(placements: dict[str, ImagePlacement],
                      tile_size: float, repel_frac: float,
-                     overlap_threshold: float = 0.35,
-                     iterations: int = 3):
+                     overlap_threshold: float = 0.6,
+                     iterations: int = 12):
     """
-    Gently nudge tiles that overlap so they spread out instead of piling up.
-    Each iteration pushes overlapping pairs apart by `repel_frac` of tile_size.
-    Only pushes tiles whose centres are closer than `overlap_threshold * tile_size`.
-    Low repel_frac = tight shingling (more Hockney-like).
+    Nudge tiles that overlap so they spread into a 2D mosaic instead of piling up.
+
+    The key insight: homography-based placement often puts many tiles in the
+    same general area (they all match the same high-contrast region).  A simple
+    3-iteration push isn't enough — we need many iterations with perpendicular
+    jitter to break diagonal cascade patterns.
+
+    Each iteration:
+      1. Finds overlapping pairs (centres closer than overlap_threshold * tile_size)
+      2. Pushes them apart along the line between their centres
+      3. Adds a small perpendicular jitter to prevent stable diagonal lines
     """
     if len(placements) < 2:
         return
 
     ids = list(placements.keys())
+    n = len(ids)
     push = tile_size * repel_frac
     min_dist = tile_size * overlap_threshold
 
-    for _ in range(iterations):
-        for i in range(len(ids)):
-            for j in range(i + 1, len(ids)):
+    import random
+    rng = random.Random(42)  # deterministic jitter
+
+    for iteration in range(iterations):
+        moved = False
+        # Decay push over iterations — start aggressive, end gentle
+        decay = 1.0 - (iteration / iterations) * 0.5  # 1.0 → 0.5
+        this_push = push * decay
+
+        for i in range(n):
+            for j in range(i + 1, n):
                 p_a = placements[ids[i]]
                 p_b = placements[ids[j]]
                 dx = p_b.x - p_a.x
@@ -952,19 +1092,33 @@ def _spread_overlaps(placements: dict[str, ImagePlacement],
                 dist = math.sqrt(dx * dx + dy * dy)
 
                 if dist < min_dist:
+                    moved = True
                     if dist < 1.0:
-                        # Near-identical position — push in arbitrary direction
-                        dx, dy, dist = 1.0, 0.5, 1.118
+                        # Near-identical position — random direction
+                        angle = rng.uniform(0, 2 * math.pi)
+                        dx = math.cos(angle)
+                        dy = math.sin(angle)
+                        dist = 1.0
                     nx = dx / dist
                     ny = dy / dist
-                    p_a.x -= nx * push * 0.5
-                    p_a.y -= ny * push * 0.5
+
+                    # Add perpendicular jitter (breaks diagonal cascades)
+                    jitter = rng.uniform(-0.3, 0.3) * this_push
+                    perp_x = -ny * jitter
+                    perp_y = nx * jitter
+
+                    half_push = this_push * 0.5
+                    p_a.x -= nx * half_push - perp_x
+                    p_a.y -= ny * half_push - perp_y
                     p_a.auto_x = p_a.x
                     p_a.auto_y = p_a.y
-                    p_b.x += nx * push * 0.5
-                    p_b.y += ny * push * 0.5
+                    p_b.x += nx * half_push + perp_x
+                    p_b.y += ny * half_push + perp_y
                     p_b.auto_x = p_b.x
                     p_b.auto_y = p_b.y
+
+        if not moved:
+            break  # converged early
 
 
 # ── Transform helpers ──────────────────────────────────────────────────────────
