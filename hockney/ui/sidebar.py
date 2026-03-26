@@ -39,6 +39,7 @@ class Sidebar(QWidget):
     process_requested = pyqtSignal(dict)
     reference_changed = pyqtSignal()
     bg_color_changed = pyqtSignal(QColor)
+    ref_backdrop_changed = pyqtSignal(float, float)  # (opacity, scale)
 
     def __init__(self, store: ImageStore, models_dir: Path | None = None,
                  parent: QWidget | None = None):
@@ -167,6 +168,41 @@ class Sidebar(QWidget):
         self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
         bg_layout.addLayout(opacity_row)
 
+        # Reference backdrop opacity row
+        ref_opa_row = QHBoxLayout()
+        ref_opa_row.addWidget(QLabel("Ref opacity:"))
+        self._ref_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self._ref_opacity_slider.setRange(0, 50)   # 0%–50%
+        self._ref_opacity_slider.setValue(15)        # default 15%
+        self._ref_opacity_slider.setToolTip(
+            "Opacity of the reference image backdrop.\n"
+            "0 = hidden, higher = more visible guide."
+        )
+        ref_opa_row.addWidget(self._ref_opacity_slider)
+        self._ref_opa_label = QLabel("15%")
+        self._ref_opa_label.setFixedWidth(32)
+        ref_opa_row.addWidget(self._ref_opa_label)
+        self._ref_opacity_slider.valueChanged.connect(self._on_ref_opacity_changed)
+        bg_layout.addLayout(ref_opa_row)
+
+        # Reference backdrop scale row
+        ref_scale_row = QHBoxLayout()
+        ref_scale_row.addWidget(QLabel("Ref scale:"))
+        self._ref_scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self._ref_scale_slider.setRange(20, 200)   # 20%–200%
+        self._ref_scale_slider.setValue(100)         # default 100% (match coordinate space)
+        self._ref_scale_slider.setToolTip(
+            "Scale of the reference backdrop.\n"
+            "100% = matches placement coordinates.\n"
+            "Lower = shrink the reference to better match tile sizes."
+        )
+        ref_scale_row.addWidget(self._ref_scale_slider)
+        self._ref_scale_label = QLabel("100%")
+        self._ref_scale_label.setFixedWidth(40)
+        ref_scale_row.addWidget(self._ref_scale_label)
+        self._ref_scale_slider.valueChanged.connect(self._on_ref_scale_changed)
+        bg_layout.addLayout(ref_scale_row)
+
         layout.addWidget(bg_group)
 
         # ── Matching engine selector ─────────────────────────────────────────
@@ -241,9 +277,22 @@ class Sidebar(QWidget):
 
     def _on_opacity_changed(self, value: int):
         self._opacity_label.setText(f"{value}%")
-        # Update the class-level drag opacity on all PhotoItems
         from hockney.ui.tray_view import PhotoItem
         PhotoItem.drag_opacity = value / 100.0
+
+    def _on_ref_opacity_changed(self, value: int):
+        self._ref_opa_label.setText(f"{value}%")
+        self.ref_backdrop_changed.emit(
+            value / 100.0,
+            self._ref_scale_slider.value() / 100.0,
+        )
+
+    def _on_ref_scale_changed(self, value: int):
+        self._ref_scale_label.setText(f"{value}%")
+        self.ref_backdrop_changed.emit(
+            self._ref_opacity_slider.value() / 100.0,
+            value / 100.0,
+        )
 
     @property
     def bg_color(self) -> QColor:

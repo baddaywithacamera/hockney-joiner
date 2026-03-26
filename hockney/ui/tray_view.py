@@ -515,12 +515,17 @@ class TrayView(QGraphicsView):
         self.setBackgroundBrush(color)
         self.viewport().update()
 
-    def show_reference_backdrop(self, config):
+    def show_reference_backdrop(self, config, opacity: float = 0.15,
+                                scale_pct: float = 1.0):
         """
         Show the reference image(s) as a semi-transparent backdrop on the canvas.
         This gives the user a visual guide for where tiles should land.
+
+        opacity: 0.0–1.0 backdrop opacity
+        scale_pct: 1.0 = match placement coordinate space, <1 shrinks
         """
         self._remove_reference_backdrop()
+        self._ref_config = config   # stash for re-render on slider change
 
         if config is None or not config.has_references():
             return
@@ -534,17 +539,18 @@ class TrayView(QGraphicsView):
                 pil = PILImage.open(ref.source_path)
                 pil = ImageOps.exif_transpose(pil).convert("RGB")
                 w, h = pil.size
-                scale = PREVIEW_LONG_EDGE / max(w, h)
+                scale = PREVIEW_LONG_EDGE / max(w, h) * scale_pct
                 new_w, new_h = int(w * scale), int(h * scale)
+                if new_w < 10 or new_h < 10:
+                    continue
                 pil = pil.resize((new_w, new_h), PILImage.LANCZOS)
 
                 arr = np.array(pil)
                 pixmap = _numpy_to_pixmap(arr)
 
                 backdrop = QGraphicsPixmapItem(pixmap)
-                backdrop.setOpacity(0.2)
+                backdrop.setOpacity(opacity)
                 backdrop.setZValue(-1000)  # behind everything
-                # Don't allow selection or interaction
                 backdrop.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
                 backdrop.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
                 backdrop.setAcceptHoverEvents(False)
@@ -556,6 +562,12 @@ class TrayView(QGraphicsView):
 
             except Exception as e:
                 log.warning("Failed to load reference backdrop %s: %s", ref.slot, e)
+
+    def update_reference_backdrop(self, opacity: float, scale_pct: float):
+        """Re-render reference backdrop with new opacity/scale from sidebar sliders."""
+        config = getattr(self, '_ref_config', None)
+        if config is not None:
+            self.show_reference_backdrop(config, opacity, scale_pct)
 
     def _remove_reference_backdrop(self):
         """Remove any existing reference backdrops from the scene."""
