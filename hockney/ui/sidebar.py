@@ -41,6 +41,8 @@ class Sidebar(QWidget):
     bg_color_changed = pyqtSignal(QColor)
     ref_backdrop_changed = pyqtSignal(float, float)  # (opacity, scale)
     fit_all_requested = pyqtSignal()
+    border_width_changed = pyqtSignal(int)
+    shadow_changed = pyqtSignal(bool)
 
     def __init__(self, store: ImageStore, models_dir: Path | None = None,
                  parent: QWidget | None = None):
@@ -203,6 +205,29 @@ class Sidebar(QWidget):
         self._ref_scale_slider.valueChanged.connect(self._on_ref_scale_changed)
         bg_layout.addLayout(ref_scale_row)
 
+        # Border width row
+        border_row = QHBoxLayout()
+        border_row.addWidget(QLabel("Border:"))
+        self._border_slider = QSlider(Qt.Orientation.Horizontal)
+        self._border_slider.setRange(0, 20)
+        self._border_slider.setValue(0)
+        self._border_slider.setToolTip(
+            "White print border around each tile (Hockney Polaroid style)"
+        )
+        border_row.addWidget(self._border_slider)
+        self._border_label = QLabel("0 px")
+        self._border_label.setFixedWidth(32)
+        border_row.addWidget(self._border_label)
+        self._border_slider.valueChanged.connect(self._on_border_changed)
+        bg_layout.addLayout(border_row)
+
+        # Drop shadow checkbox
+        self._shadow_check = QCheckBox("Drop shadows")
+        self._shadow_check.setToolTip("Subtle shadow beneath each tile for a prints-on-table look")
+        self._shadow_check.setChecked(False)
+        self._shadow_check.toggled.connect(self.shadow_changed)
+        bg_layout.addWidget(self._shadow_check)
+
         # Fit-all button
         self._fit_all_btn = QPushButton("Fit All in View  [F]")
         self._fit_all_btn.setToolTip(
@@ -290,6 +315,10 @@ class Sidebar(QWidget):
         from hockney.ui.tray_view import PhotoItem
         PhotoItem.drag_opacity = value / 100.0
 
+    def _on_border_changed(self, value: int):
+        self._border_label.setText(f"{value} px")
+        self.border_width_changed.emit(value)
+
     def _on_ref_opacity_changed(self, value: int):
         self._ref_opa_label.setText(f"{value}%")
         self.ref_backdrop_changed.emit(
@@ -364,6 +393,8 @@ class Sidebar(QWidget):
             "surface_intensity": self.intensity_slider.value(),
             "tile_size": self.tile_slider.value(),
             "bg_color": (c.red(), c.green(), c.blue()),
+            "border_width": self._border_slider.value(),
+            "shadow": self._shadow_check.isChecked(),
         }
 
     def apply_processing_settings(self, settings: dict):
@@ -380,6 +411,7 @@ class Sidebar(QWidget):
         tile = settings.get("tile_size", 300)
         self.tile_slider.setValue(tile)
         self._on_tile_size_changed(tile)
+        self._shadow_check.setChecked(settings.get("shadow", False))
 
     def set_active_image(self, image_id: str):
         record = self.store.get_record(image_id)

@@ -192,6 +192,29 @@ def render_composite(
         # Resize original to slot size
         resized = full.resize((tw, th), Image.LANCZOS)
 
+        # Add white border if specified
+        border_width = processing.get("border_width", 0)
+        if border_width > 0:
+            border_width_scaled = int(border_width * scale)
+            if border_width_scaled > 0:
+                # Determine if we need alpha channel for transparent backgrounds
+                if transparent and resized.mode != "RGBA":
+                    resized = resized.convert("RGBA")
+                resized = ImageOps.expand(resized, border=border_width_scaled, fill=(255, 255, 255, 255) if resized.mode == "RGBA" else (255, 255, 255))
+                # Update dimensions for paste position calculation
+                tw = resized.width
+                th = resized.height
+
+        # Apply crop if set (crop values are in thumbnail space, scale them)
+        if p.crop_top or p.crop_right or p.crop_bottom or p.crop_left:
+            ct = int(p.crop_top * scale)
+            cr = int(p.crop_right * scale)
+            cb = int(p.crop_bottom * scale)
+            cl = int(p.crop_left * scale)
+            resized = resized.crop((cl, ct, resized.width - cr, resized.height - cb))
+            tw = resized.width
+            th = resized.height
+
         # Rotate around image centre (PIL rotates CCW; Qt CW — negate angle)
         if abs(p.rotation) > 0.001:
             rotated = resized.rotate(-p.rotation, expand=True, resample=Image.BICUBIC)
@@ -203,6 +226,20 @@ def render_composite(
         cy = p.y * scale - origin_y + th / 2
         paste_x = int(cx - rotated.width / 2)
         paste_y = int(cy - rotated.height / 2)
+
+        # Drop shadow rendering (if enabled)
+        if processing.get("shadow", False):
+            from PIL import ImageDraw, ImageFilter
+            shadow_offset = int(4 * scale)
+            shadow = Image.new("RGBA", rotated.size, (0, 0, 0, 0))
+            shadow_draw = ImageDraw.Draw(shadow)
+            shadow_draw.rectangle([0, 0, shadow.width-1, shadow.height-1], fill=(0, 0, 0, 80))
+            shadow = shadow.filter(ImageFilter.GaussianBlur(radius=int(6*scale)))
+            shadow_alpha = shadow.split()[3]
+            if transparent:
+                canvas.paste(shadow, (paste_x + shadow_offset, paste_y + shadow_offset), shadow_alpha)
+            else:
+                canvas.paste(shadow.convert("RGB"), (paste_x + shadow_offset, paste_y + shadow_offset), shadow_alpha)
 
         # Use alpha channel as mask so rotated corners don't leave rectangles
         alpha = rotated.split()[3] if rotated.mode == "RGBA" else None

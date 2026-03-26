@@ -24,11 +24,19 @@ class ImagePlacement:
     auto_x: float = 0.0
     auto_y: float = 0.0
     auto_rotation: float = 0.0
+    crop_top: int = 0
+    crop_right: int = 0
+    crop_bottom: int = 0
+    crop_left: int = 0
 
     def reset_to_auto(self):
         self.x = self.auto_x
         self.y = self.auto_y
         self.rotation = self.auto_rotation
+
+    @property
+    def has_crop(self) -> bool:
+        return self.crop_top > 0 or self.crop_right > 0 or self.crop_bottom > 0 or self.crop_left > 0
 
     def as_dict(self) -> dict:
         return {
@@ -36,6 +44,10 @@ class ImagePlacement:
             "x": self.x, "y": self.y,
             "rotation": self.rotation,
             "z_order": self.z_order,
+            "crop_top": self.crop_top,
+            "crop_right": self.crop_right,
+            "crop_bottom": self.crop_bottom,
+            "crop_left": self.crop_left,
         }
 
     @classmethod
@@ -45,6 +57,10 @@ class ImagePlacement:
             x=d.get("x", 0.0), y=d.get("y", 0.0),
             rotation=d.get("rotation", 0.0),
             z_order=d.get("z_order", 0),
+            crop_top=d.get("crop_top", 0),
+            crop_right=d.get("crop_right", 0),
+            crop_bottom=d.get("crop_bottom", 0),
+            crop_left=d.get("crop_left", 0),
         )
 
 
@@ -160,4 +176,8 @@ class PlacementSnapshot:
     y: float
     rotation: float
     z_order: int
+    crop_top: int = 0
+    crop_right: int = 0
+    crop_bottom: int = 0
+    crop_left: int = 0
     removed: bool = False

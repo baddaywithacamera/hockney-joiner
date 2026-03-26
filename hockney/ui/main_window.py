@@ -326,6 +326,8 @@ class MainWindow(QMainWindow):
         self.sidebar.bg_color_changed.connect(self.tray_view.set_bg_color)
         self.sidebar.ref_backdrop_changed.connect(self.tray_view.update_reference_backdrop)
         self.sidebar.fit_all_requested.connect(self.tray_view.fit_all)
+        self.sidebar.border_width_changed.connect(self.tray_view.set_border_width)
+        self.sidebar.shadow_changed.connect(self.tray_view.set_shadow_enabled)
         self.tray_view.image_activated.connect(self._on_image_activated)
         self.tray_view.deal_mode_changed.connect(self._on_deal_mode_changed)
         # Connect moondream chat panel to the tray view

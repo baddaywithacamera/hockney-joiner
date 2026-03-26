@@ -13,12 +13,16 @@ Keyboard controls (per spec):
   R                     Reset active image to auto-placed position
   G                     Toggle grid overlay
   F                     Fit all images in view
+  Tab / Shift+Tab       Cycle through tiles in z-order (forward/backward)
+  Escape                Deselect all tiles and clear multi-select
 
 Mouse:
   Scroll wheel          Zoom in/out
   Middle-mouse drag     Pan canvas
   Click image           Activate (keyboard controls apply to it)
+  Shift+click image     Toggle multi-select (add/remove from selection)
   Click empty canvas    Deactivate
+  Drag selected tiles   Move all selected tiles together
 
 Z-order pile controls:
   Ctrl + hover          Highlight the pile of images under the cursor
@@ -62,6 +66,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGraphicsDropShadowEffect,
     QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsLineItem,
@@ -72,6 +77,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -404,6 +410,10 @@ class PhotoItem(QGraphicsPixmapItem):
     drag_opacity: float = 0.85
     # Class-level display scale: maps 1500px placement coords → visual coords
     display_scale: float = 1.0
+    # Class-level border width (shared by all items, set from sidebar)
+    border_width: int = 0
+    # Class-level shadow enabled flag (controlled globally from sidebar)
+    shadow_enabled: bool = False
 
     def __init__(self, image_id: str, pixmap: QPixmap, placement: ImagePlacement):
         super().__init__(pixmap)
@@ -418,6 +428,14 @@ class PhotoItem(QGraphicsPixmapItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setAcceptHoverEvents(True)
         self._apply_placement()
+
+        # Drop shadow effect (controlled globally from sidebar)
+        self._shadow = QGraphicsDropShadowEffect()
+        self._shadow.setBlurRadius(15)
+        self._shadow.setOffset(4, 4)
+        self._shadow.setColor(QColor(0, 0, 0, 120))
+        self._shadow.setEnabled(PhotoItem.shadow_enabled)
+        self.setGraphicsEffect(self._shadow)
 
         # Rotation drag handle (hidden by default, shown when activated)
         self._rotation_handle = RotationHandle(self)
@@ -442,6 +460,50 @@ class PhotoItem(QGraphicsPixmapItem):
 
     def hide_rotation_handle(self):
         self._rotation_handle.hide_handle()
+
+    def boundingRect(self):
+        """Return the visible bounding rect, accounting for crop."""
+        from PyQt6.QtCore import QRectF
+        r = super().boundingRect()
+        p = self.placement
+        bw = self.border_width
+        if p.has_crop:
+            r = QRectF(p.crop_left, p.crop_top,
+                       r.width() - p.crop_left - p.crop_right,
+                       r.height() - p.crop_top - p.crop_bottom)
+        if bw > 0:
+            r = r.adjusted(-bw, -bw, bw, bw)
+        return r
+
+    def shape(self):
+        """Use boundingRect for hit testing so cropped areas aren't clickable."""
+        from PyQt6.QtGui import QPainterPath
+        path = QPainterPath()
+        path.addRect(self.boundingRect())
+        return path
+
+    def paint(self, painter, option, widget=None):
+        """Paint the pixmap, respecting crop margins and border."""
+        p = self.placement
+        bw = self.border_width
+        pm = self.pixmap()
+
+        if p.has_crop:
+            # Draw only the cropped region of the pixmap
+            src = QRectF(p.crop_left, p.crop_top,
+                         pm.width() - p.crop_left - p.crop_right,
+                         pm.height() - p.crop_top - p.crop_bottom)
+            dst = QRectF(p.crop_left, p.crop_top, src.width(), src.height())
+        else:
+            src = QRectF(0, 0, pm.width(), pm.height())
+            dst = QRectF(0, 0, pm.width(), pm.height())
+
+        # Draw white border if enabled
+        if bw > 0:
+            border_rect = dst.adjusted(-bw, -bw, bw, bw)
+            painter.fillRect(border_rect, Qt.GlobalColor.white)
+
+        painter.drawPixmap(dst, pm, src)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -518,6 +580,20 @@ class TrayView(QGraphicsView):
         """Update the canvas background colour from the sidebar picker."""
         self.setBackgroundBrush(color)
         self.viewport().update()
+
+    def set_border_width(self, width: int):
+        """Set the white print border width for all tiles."""
+        PhotoItem.border_width = width
+        for item in self._items.values():
+            item.update()
+
+    def set_shadow_enabled(self, enabled: bool):
+        """Toggle drop shadows on all tiles."""
+        PhotoItem.shadow_enabled = enabled
+        for item in self._items.values():
+            effect = item.graphicsEffect()
+            if effect:
+                effect.setEnabled(enabled)
 
     def show_reference_backdrop(self, config, opacity: float = 0.15,
                                 scale_pct: float = 1.0):
@@ -828,6 +904,26 @@ class TrayView(QGraphicsView):
         for item in self._items.values():
             item.setOpacity(1.0)
 
+    def _cycle_active(self, forward: bool = True):
+        """Cycle activation to the next/previous tile in z-order."""
+        visible = sorted(
+            [p for p in self._placements.values() if p.image_id not in self._removed_ids],
+            key=lambda p: p.z_order,
+        )
+        if not visible:
+            return
+        ids = [p.image_id for p in visible]
+        if self._active_id in ids:
+            idx = ids.index(self._active_id)
+            idx = (idx + (1 if forward else -1)) % len(ids)
+        else:
+            idx = 0
+        self._activate(ids[idx])
+        # Centre view on the newly active tile
+        item = self._items.get(ids[idx])
+        if item:
+            self.centerOn(item)
+
     # ── Keyboard ───────────────────────────────────────────────────────────────
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -862,6 +958,22 @@ class TrayView(QGraphicsView):
             return
         if key == Qt.Key.Key_F:
             self.fit_all()
+            return
+
+        # Tab / Shift+Tab: cycle through tiles
+        if key == Qt.Key.Key_Tab:
+            self._cycle_active(forward=True)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Backtab:
+            self._cycle_active(forward=False)
+            event.accept()
+            return
+
+        # Escape: clear selection and deactivate all
+        if key == Qt.Key.Key_Escape and not self.in_deal_mode:
+            self._deactivate_all()
+            self._scene.clearSelection()
             return
 
         if self._active_id is None:
@@ -925,10 +1037,15 @@ class TrayView(QGraphicsView):
             p.y = snap.y
             p.rotation = snap.rotation
             p.z_order = snap.z_order
+            p.crop_top = snap.crop_top
+            p.crop_right = snap.crop_right
+            p.crop_bottom = snap.crop_bottom
+            p.crop_left = snap.crop_left
             item = self._items.get(snap.image_id)
             if item:
                 item._apply_placement()
                 item.setVisible(not snap.removed)
+                item.update()
 
     # ── Remove ─────────────────────────────────────────────────────────────────
 
@@ -1353,7 +1470,11 @@ class TrayView(QGraphicsView):
         #  handled below in the right-click context menu and Z/X keys)
 
         if isinstance(item, PhotoItem):
-            self._activate(item.image_id)
+            if mod & Qt.KeyboardModifier.ShiftModifier:
+                # Shift+click: toggle selection without deactivating others
+                item.setSelected(not item.isSelected())
+            else:
+                self._activate(item.image_id)
         elif isinstance(item, RotationHandle):
             # User clicked the rotation handle — keep parent active,
             # let the handle's own mousePressEvent do the rotation.
@@ -1373,7 +1494,7 @@ class TrayView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event):
-        """Right-click context menu for z-order control."""
+        """Right-click context menu for z-order control and cropping."""
         item = self.itemAt(event.pos())
         if not isinstance(item, PhotoItem):
             super().contextMenuEvent(event)
@@ -1387,6 +1508,8 @@ class TrayView(QGraphicsView):
         menu.addSeparator()
         bring_top = menu.addAction("Bring to Front")
         send_bottom = menu.addAction("Send to Back")
+        menu.addSeparator()
+        crop_action = menu.addAction("Crop Tile…")
 
         action = menu.exec(event.globalPos())
         if action is None:
@@ -1407,6 +1530,8 @@ class TrayView(QGraphicsView):
             item.placement.z_order = min_z
             item._apply_placement()
             self._commands.push([snap_before])
+        elif action == crop_action:
+            self._crop_dialog(item)
 
     def keyReleaseEvent(self, event):
         """Clear pile highlight when Ctrl is released."""
@@ -1429,11 +1554,57 @@ class TrayView(QGraphicsView):
             x=p.x, y=p.y,
             rotation=p.rotation,
             z_order=p.z_order,
+            crop_top=p.crop_top,
+            crop_right=p.crop_right,
+            crop_bottom=p.crop_bottom,
+            crop_left=p.crop_left,
             removed=removed,
         )
 
     def _snapshot_all(self) -> list[PlacementSnapshot]:
         return [self._snapshot_one(iid) for iid in self._placements]
+
+    def _crop_dialog(self, item: PhotoItem):
+        """Simple dialog to set crop margins on a tile."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Crop Tile")
+        layout = QFormLayout(dlg)
+
+        pm = item.pixmap()
+        max_w = pm.width() // 2
+        max_h = pm.height() // 2
+
+        top = QSpinBox()
+        top.setRange(0, max_h)
+        top.setValue(item.placement.crop_top)
+        right = QSpinBox()
+        right.setRange(0, max_w)
+        right.setValue(item.placement.crop_right)
+        bottom = QSpinBox()
+        bottom.setRange(0, max_h)
+        bottom.setValue(item.placement.crop_bottom)
+        left = QSpinBox()
+        left.setRange(0, max_w)
+        left.setValue(item.placement.crop_left)
+
+        layout.addRow("Top:", top)
+        layout.addRow("Right:", right)
+        layout.addRow("Bottom:", bottom)
+        layout.addRow("Left:", left)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            snap = self._snapshot_one(item.image_id)
+            item.placement.crop_top = top.value()
+            item.placement.crop_right = right.value()
+            item.placement.crop_bottom = bottom.value()
+            item.placement.crop_left = left.value()
+            self._commands.push([snap])
+            item.update()
 
     def _update_scene_rect(self):
         """Expand scene rect to fit all items with margin."""
