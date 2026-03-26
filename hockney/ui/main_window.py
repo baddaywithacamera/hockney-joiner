@@ -479,6 +479,7 @@ class MainWindow(QMainWindow):
             self.process_btn.setEnabled(True)
             self._update_status("Placement cancelled.")
             return
+        self.tray_view.show_reference_backdrop(self._project_config)
         self.tray_view.set_placements(result.placements)
         self.tray_view.fit_all()
         self.process_btn.setEnabled(True)

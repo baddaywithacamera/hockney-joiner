@@ -515,6 +515,55 @@ class TrayView(QGraphicsView):
         self.setBackgroundBrush(color)
         self.viewport().update()
 
+    def show_reference_backdrop(self, config):
+        """
+        Show the reference image(s) as a semi-transparent backdrop on the canvas.
+        This gives the user a visual guide for where tiles should land.
+        """
+        self._remove_reference_backdrop()
+
+        if config is None or not config.has_references():
+            return
+
+        from PIL import Image as PILImage, ImageOps
+
+        PREVIEW_LONG_EDGE = 1500
+
+        for ref in config.references:
+            try:
+                pil = PILImage.open(ref.source_path)
+                pil = ImageOps.exif_transpose(pil).convert("RGB")
+                w, h = pil.size
+                scale = PREVIEW_LONG_EDGE / max(w, h)
+                new_w, new_h = int(w * scale), int(h * scale)
+                pil = pil.resize((new_w, new_h), PILImage.LANCZOS)
+
+                arr = np.array(pil)
+                pixmap = _numpy_to_pixmap(arr)
+
+                backdrop = QGraphicsPixmapItem(pixmap)
+                backdrop.setOpacity(0.2)
+                backdrop.setZValue(-1000)  # behind everything
+                # Don't allow selection or interaction
+                backdrop.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                backdrop.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+                backdrop.setAcceptHoverEvents(False)
+
+                self._scene.addItem(backdrop)
+                if not hasattr(self, '_ref_backdrops'):
+                    self._ref_backdrops = []
+                self._ref_backdrops.append(backdrop)
+
+            except Exception as e:
+                log.warning("Failed to load reference backdrop %s: %s", ref.slot, e)
+
+    def _remove_reference_backdrop(self):
+        """Remove any existing reference backdrops from the scene."""
+        if hasattr(self, '_ref_backdrops'):
+            for item in self._ref_backdrops:
+                self._scene.removeItem(item)
+            self._ref_backdrops.clear()
+
     def refresh(self):
         """Rebuild canvas from current store contents."""
         self._scene.clear()
