@@ -58,6 +58,23 @@ SUBJECT_TUNING = {
 }
 
 
+def _snap_orientation(degrees: float, tolerance: float = 30.0) -> float:
+    """
+    Snap a detected rotation to the nearest 90° multiple (0, ±90, 180) if
+    within *tolerance* degrees.  Returns 0.0 for small rotations that are
+    just camera shake, and the snapped angle for genuine orientation changes
+    (portrait vs landscape).
+    """
+    # Normalise to –180 … +180
+    d = degrees % 360
+    if d > 180:
+        d -= 360
+    for snap in (0.0, 90.0, -90.0, 180.0, -180.0):
+        if abs(d - snap) <= tolerance:
+            return snap if abs(snap) != 180 else 180.0
+    return 0.0   # not close to any standard orientation → leave upright
+
+
 def _homography_center(inlier_det, inlier_ref, dw, dh, ref_w, ref_h,
                        ransac_reproj=5.0, margin=0.2):
     """
@@ -993,6 +1010,10 @@ class PlacementWorker(QThread):
                 final_x = cx
                 final_y = cy
 
+                # Snap detected rotation to nearest 90° if it's a genuine
+                # orientation change (portrait shot on landscape ref, etc.)
+                snapped_rot = _snap_orientation(best_rot)
+
                 # Centre the tile on the match point (tile is at thumb size)
                 aspect = record.width / max(record.height, 1)
                 if aspect >= 1:
@@ -1006,9 +1027,9 @@ class PlacementWorker(QThread):
 
                 p = ImagePlacement(
                     image_id=record.id,
-                    x=final_x, y=final_y, rotation=0.0,
+                    x=final_x, y=final_y, rotation=snapped_rot,
                     z_order=placed_count,
-                    auto_x=final_x, auto_y=final_y, auto_rotation=0.0,
+                    auto_x=final_x, auto_y=final_y, auto_rotation=snapped_rot,
                 )
                 placements[record.id] = p
                 placed_count += 1
@@ -1024,6 +1045,7 @@ class PlacementWorker(QThread):
         for uid, n_inliers, ref_centroid, rot in odds_and_ends:
             if n_inliers >= MIN_MATCHES_RELAXED and ref_centroid:
                 cx, cy = ref_centroid
+                snapped_rot = _snap_orientation(rot)
                 record = self.store.get_record(uid)
                 if record:
                     aspect = record.width / max(record.height, 1)
@@ -1035,9 +1057,9 @@ class PlacementWorker(QThread):
                 final_y = cy - tile_h / 2
                 p = ImagePlacement(
                     image_id=uid,
-                    x=final_x, y=final_y, rotation=0.0,
+                    x=final_x, y=final_y, rotation=snapped_rot,
                     z_order=placed_count,
-                    auto_x=final_x, auto_y=final_y, auto_rotation=0.0,
+                    auto_x=final_x, auto_y=final_y, auto_rotation=snapped_rot,
                 )
                 placements[uid] = p
                 placed_count += 1

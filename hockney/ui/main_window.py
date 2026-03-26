@@ -325,6 +325,7 @@ class MainWindow(QMainWindow):
         self.sidebar.reference_changed.connect(self._on_reference_changed)
         self.sidebar.bg_color_changed.connect(self.tray_view.set_bg_color)
         self.sidebar.ref_backdrop_changed.connect(self.tray_view.update_reference_backdrop)
+        self.sidebar.fit_all_requested.connect(self.tray_view.fit_all)
         self.tray_view.image_activated.connect(self._on_image_activated)
         self.tray_view.deal_mode_changed.connect(self._on_deal_mode_changed)
         # Connect moondream chat panel to the tray view
@@ -480,8 +481,14 @@ class MainWindow(QMainWindow):
             self.process_btn.setEnabled(True)
             self._update_status("Placement cancelled.")
             return
-        self.tray_view.show_reference_backdrop(self._project_config)
         self.tray_view.set_placements(result.placements)
+        # Auto-scale so tiles and reference are visually proportionate
+        auto_s = self.tray_view.auto_scale_to_fit()
+        self.sidebar.set_ref_scale(auto_s)
+        # Now show the backdrop at the computed scale
+        ref_opacity = self.sidebar._ref_opacity_slider.value() / 100.0
+        self.tray_view.show_reference_backdrop(
+            self._project_config, opacity=ref_opacity, scale_pct=auto_s)
         self.tray_view.fit_all()
         self.process_btn.setEnabled(True)
         self._update_status(result.message)

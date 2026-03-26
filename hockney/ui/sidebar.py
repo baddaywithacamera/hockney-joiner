@@ -40,6 +40,7 @@ class Sidebar(QWidget):
     reference_changed = pyqtSignal()
     bg_color_changed = pyqtSignal(QColor)
     ref_backdrop_changed = pyqtSignal(float, float)  # (opacity, scale)
+    fit_all_requested = pyqtSignal()
 
     def __init__(self, store: ImageStore, models_dir: Path | None = None,
                  parent: QWidget | None = None):
@@ -190,11 +191,10 @@ class Sidebar(QWidget):
         ref_scale_row.addWidget(QLabel("Ref scale:"))
         self._ref_scale_slider = QSlider(Qt.Orientation.Horizontal)
         self._ref_scale_slider.setRange(20, 200)   # 20%–200%
-        self._ref_scale_slider.setValue(100)         # default 100% (match coordinate space)
+        self._ref_scale_slider.setValue(100)         # default 100%
         self._ref_scale_slider.setToolTip(
             "Scale of the reference backdrop.\n"
-            "100% = matches placement coordinates.\n"
-            "Lower = shrink the reference to better match tile sizes."
+            "Tiles reposition to stay aligned with the reference."
         )
         ref_scale_row.addWidget(self._ref_scale_slider)
         self._ref_scale_label = QLabel("100%")
@@ -202,6 +202,16 @@ class Sidebar(QWidget):
         ref_scale_row.addWidget(self._ref_scale_label)
         self._ref_scale_slider.valueChanged.connect(self._on_ref_scale_changed)
         bg_layout.addLayout(ref_scale_row)
+
+        # Fit-all button
+        self._fit_all_btn = QPushButton("Fit All in View  [F]")
+        self._fit_all_btn.setToolTip(
+            "Zoom to show all tiles and the reference backdrop.\n"
+            "The backdrop is locked to the placement coordinate space\n"
+            "so tiles always sit in the correct position on the reference."
+        )
+        self._fit_all_btn.clicked.connect(self.fit_all_requested)
+        bg_layout.addWidget(self._fit_all_btn)
 
         layout.addWidget(bg_group)
 
@@ -293,6 +303,15 @@ class Sidebar(QWidget):
             self._ref_opacity_slider.value() / 100.0,
             value / 100.0,
         )
+
+    def set_ref_scale(self, scale_pct: float):
+        """Programmatically set the ref scale slider (e.g. from auto-scale)."""
+        value = int(round(scale_pct * 100))
+        value = max(20, min(200, value))
+        self._ref_scale_slider.blockSignals(True)
+        self._ref_scale_slider.setValue(value)
+        self._ref_scale_label.setText(f"{value}%")
+        self._ref_scale_slider.blockSignals(False)
 
     @property
     def bg_color(self) -> QColor:

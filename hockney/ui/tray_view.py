@@ -402,6 +402,8 @@ class PhotoItem(QGraphicsPixmapItem):
 
     # Class-level drag opacity (shared by all items, set from sidebar)
     drag_opacity: float = 0.85
+    # Class-level display scale: maps 1500px placement coords → visual coords
+    display_scale: float = 1.0
 
     def __init__(self, image_id: str, pixmap: QPixmap, placement: ImagePlacement):
         super().__init__(pixmap)
@@ -421,15 +423,17 @@ class PhotoItem(QGraphicsPixmapItem):
         self._rotation_handle = RotationHandle(self)
 
     def _apply_placement(self):
-        self.setPos(self.placement.x, self.placement.y)
+        s = self.display_scale
+        self.setPos(self.placement.x * s, self.placement.y * s)
         self.setRotation(self.placement.rotation)
         self.setZValue(self.placement.z_order)
 
     def read_back_placement(self):
         """Push current item position back into the placement dataclass."""
+        s = self.display_scale if self.display_scale else 1.0
         pos = self.pos()
-        self.placement.x = pos.x()
-        self.placement.y = pos.y()
+        self.placement.x = pos.x() / s
+        self.placement.y = pos.y() / s
         self.placement.rotation = self.rotation()
         self.placement.z_order = int(self.zValue())
 
@@ -519,10 +523,13 @@ class TrayView(QGraphicsView):
                                 scale_pct: float = 1.0):
         """
         Show the reference image(s) as a semi-transparent backdrop on the canvas.
-        This gives the user a visual guide for where tiles should land.
 
-        opacity: 0.0–1.0 backdrop opacity
-        scale_pct: 1.0 = match placement coordinate space, <1 shrinks
+        The backdrop is rendered at PREVIEW_LONG_EDGE * scale_pct.  Tile
+        positions are also scaled by the same factor (via PhotoItem.display_scale)
+        so tiles stay aligned with the reference at any scale.
+
+        opacity:   0.0–1.0 backdrop opacity
+        scale_pct: 1.0 = full 1500px coordinate space
         """
         self._remove_reference_backdrop()
         self._ref_config = config   # stash for re-render on slider change
@@ -564,7 +571,13 @@ class TrayView(QGraphicsView):
                 log.warning("Failed to load reference backdrop %s: %s", ref.slot, e)
 
     def update_reference_backdrop(self, opacity: float, scale_pct: float):
-        """Re-render reference backdrop with new opacity/scale from sidebar sliders."""
+        """Re-render reference backdrop and reposition all tiles to match."""
+        # Update the display scale on all PhotoItems
+        PhotoItem.display_scale = scale_pct
+        # Reposition all tiles to match the new scale
+        for item in self._items.values():
+            item._apply_placement()
+        # Re-render the backdrop at the new size
         config = getattr(self, '_ref_config', None)
         if config is not None:
             self.show_reference_backdrop(config, opacity, scale_pct)
@@ -653,6 +666,77 @@ class TrayView(QGraphicsView):
                 item._apply_placement()
         self._commands.push(snap_before)
         self._update_scene_rect()
+
+    def auto_scale_to_fit(self) -> float:
+        """
+        Compute a display scale that makes tiles visually proportionate to the
+        reference backdrop.
+
+        The placement engine works in a 1500px reference space with ~300px
+        tiles.  At scale 1.0 the reference is 5× larger than each tile, which
+        looks odd.  This method computes a scale where the average tile covers
+        a visually reasonable fraction of the backdrop.
+
+        Returns the computed scale (also applied immediately).
+        """
+        visible = [p for p in self._placements.values()
+                   if p.image_id not in self._removed_ids
+                   and p.image_id in self._items]
+        if not visible:
+            return 1.0
+
+        # Bounding box of tile centres in 1500px coordinate space
+        xs = [p.x for p in visible]
+        ys = [p.y for p in visible]
+        bbox_w = max(xs) - min(xs) + THUMB_LONG_EDGE
+        bbox_h = max(ys) - min(ys) + THUMB_LONG_EDGE
+
+        # The reference long edge in coordinate space
+        ref_long = 1500.0
+        # Coverage: how much of the reference the tiles span
+        coverage = max(bbox_w, bbox_h) / ref_long if ref_long else 1.0
+
+        # We want the tile bounding box to feel like it "fills" the reference.
+        # A good display scale makes the tile bbox roughly equal to the
+        # viewport's smaller dimension.  But a simpler heuristic: scale so
+        # the tile THUMB_LONG_EDGE is ~1/5 to ~1/3 of the reference visual
+        # long edge.  With coverage info we can be smarter:
+        #
+        # ideal_scale = THUMB_LONG_EDGE / (ref_long * desired_tile_fraction)
+        #
+        # desired_tile_fraction ≈ 1/(num_tiles_across), clamped.
+        # Simpler: scale = THUMB_LONG_EDGE / max(bbox_w, bbox_h)
+        # This makes the tile bbox roughly THUMB_LONG_EDGE px on screen,
+        # so one tile = full bbox.  Too small.
+        #
+        # Best heuristic: make tiles ~20% of the backdrop visual size.
+        # scale = 0.20 * ref_long / THUMB_LONG_EDGE... no, that's inverted.
+        #
+        # Actually, the most intuitive: we want the ratio of tile visual size
+        # to backdrop visual size to be reasonable.  At scale s, the backdrop
+        # is ref_long*s pixels and tiles are THUMB_LONG_EDGE pixels (unchanged).
+        # We want THUMB_LONG_EDGE / (ref_long * s) ≈ desired_ratio.
+        # So s = THUMB_LONG_EDGE / (ref_long * desired_ratio).
+        #
+        # desired_ratio depends on how many tiles span the image:
+        tiles_across = max(bbox_w, bbox_h) / THUMB_LONG_EDGE
+        tiles_across = max(tiles_across, 1.0)
+
+        # If tiles span the whole reference (~5 tiles across at 300/1500),
+        # we want each tile to be ~1/tiles_across of the backdrop.
+        # THUMB / (ref * s) = 1 / tiles_across
+        # s = THUMB * tiles_across / ref
+        scale = THUMB_LONG_EDGE * tiles_across / ref_long
+        # Clamp to slider range (20%–200%)
+        scale = max(0.20, min(2.0, scale))
+
+        # Apply
+        PhotoItem.display_scale = scale
+        for item in self._items.values():
+            item._apply_placement()
+
+        log.info("Auto-scale: %.0f%% (%.1f tiles across)", scale * 100, tiles_across)
+        return scale
 
     def fit_all(self):
         """Zoom and pan so all images are visible."""
@@ -1030,7 +1114,8 @@ class TrayView(QGraphicsView):
                 self._deal_visible_ids.add(image_id)
 
                 # Animate from bottom-right area to target position
-                target = QPointF(item.placement.x, item.placement.y)
+                s = PhotoItem.display_scale
+                target = QPointF(item.placement.x * s, item.placement.y * s)
                 view_br = self.mapToScene(
                     self.viewport().width() - 50,
                     self.viewport().height() - 50,
@@ -1062,7 +1147,8 @@ class TrayView(QGraphicsView):
         if not item:
             return
         pm = item.pixmap()
-        x, y = item.placement.x, item.placement.y
+        s = PhotoItem.display_scale
+        x, y = item.placement.x * s, item.placement.y * s
         w, h = pm.width(), pm.height()
 
         ghost = QGraphicsRectItem(x, y, w, h)

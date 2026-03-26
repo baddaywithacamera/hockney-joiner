@@ -28,6 +28,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from hockney.core.placement import _snap_orientation
+
 log = logging.getLogger(__name__)
 
 # ── CLAHE helpers ─────────────────────────────────────────────────────────────
@@ -390,9 +392,9 @@ def place_with_sift(
 
             p = ImagePlacement(
                 image_id=record.id,
-                x=final_x, y=final_y, rotation=best_rot,
+                x=final_x, y=final_y, rotation=_snap_orientation(best_rot),
                 z_order=placed_count,
-                auto_x=final_x, auto_y=final_y, auto_rotation=best_rot,
+                auto_x=final_x, auto_y=final_y, auto_rotation=_snap_orientation(best_rot),
             )
             placements[record.id] = p
             placed_count += 1
@@ -418,9 +420,9 @@ def place_with_sift(
             final_y = cy - tile_h / 2
             p = ImagePlacement(
                 image_id=uid,
-                x=final_x, y=final_y, rotation=rot,
+                x=final_x, y=final_y, rotation=_snap_orientation(rot),
                 z_order=placed_count,
-                auto_x=final_x, auto_y=final_y, auto_rotation=rot,
+                auto_x=final_x, auto_y=final_y, auto_rotation=_snap_orientation(rot),
             )
             placements[uid] = p
             placed_count += 1
