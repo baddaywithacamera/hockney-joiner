@@ -1154,6 +1154,10 @@ class TrayView(QGraphicsView):
 
         if isinstance(item, PhotoItem):
             self._activate(item.image_id)
+        elif isinstance(item, RotationHandle):
+            # User clicked the rotation handle — keep parent active,
+            # let the handle's own mousePressEvent do the rotation.
+            pass
         else:
             self._deactivate_all()
         super().mousePressEvent(event)

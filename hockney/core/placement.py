@@ -673,16 +673,18 @@ class PlacementWorker(QThread):
                     continue
 
                 tx, ty, rot = t
-                # Apply transform relative to current image's placement
+                # Apply transform relative to current image's placement.
+                # Position uses the transform, but rotation is zeroed —
+                # Hockney joiners look best with flat tiles.  The user can
+                # rotate individual tiles manually via the drag handle.
                 new_x = current_p.x + tx
                 new_y = current_p.y + ty
-                new_rot = current_p.rotation + rot
 
                 p = ImagePlacement(
                     image_id=other,
-                    x=new_x, y=new_y, rotation=new_rot,
+                    x=new_x, y=new_y, rotation=0.0,
                     z_order=len(placed),
-                    auto_x=new_x, auto_y=new_y, auto_rotation=new_rot,
+                    auto_x=new_x, auto_y=new_y, auto_rotation=0.0,
                 )
                 placements[other] = p
                 placed.add(other)
@@ -1003,9 +1005,9 @@ class PlacementWorker(QThread):
 
                 p = ImagePlacement(
                     image_id=record.id,
-                    x=final_x, y=final_y, rotation=best_rot,
+                    x=final_x, y=final_y, rotation=0.0,
                     z_order=placed_count,
-                    auto_x=final_x, auto_y=final_y, auto_rotation=best_rot,
+                    auto_x=final_x, auto_y=final_y, auto_rotation=0.0,
                 )
                 placements[record.id] = p
                 placed_count += 1
@@ -1032,9 +1034,9 @@ class PlacementWorker(QThread):
                 final_y = cy - tile_h / 2
                 p = ImagePlacement(
                     image_id=uid,
-                    x=final_x, y=final_y, rotation=rot,
+                    x=final_x, y=final_y, rotation=0.0,
                     z_order=placed_count,
-                    auto_x=final_x, auto_y=final_y, auto_rotation=rot,
+                    auto_x=final_x, auto_y=final_y, auto_rotation=0.0,
                 )
                 placements[uid] = p
                 placed_count += 1

@@ -138,6 +138,8 @@ class Sidebar(QWidget):
         self._bg_color = QColor(28, 28, 28)   # default dark gray
         self._bg_swatch = QPushButton()
         self._bg_swatch.setFixedSize(36, 36)
+        self._bg_swatch.setFlat(True)
+        self._bg_swatch.setAutoFillBackground(True)
         self._update_swatch()
         self._bg_swatch.setToolTip("Click to pick background colour")
         self._bg_swatch.clicked.connect(self._pick_bg_color)
@@ -202,9 +204,11 @@ class Sidebar(QWidget):
     def _update_swatch(self):
         """Update the colour swatch button to show the current bg colour."""
         c = self._bg_color
+        # Use QPushButton selector for specificity so the app theme can't override
         self._bg_swatch.setStyleSheet(
-            f"background: rgb({c.red()},{c.green()},{c.blue()});"
-            "border: 2px solid #666; border-radius: 4px;"
+            f"QPushButton {{ background-color: rgb({c.red()},{c.green()},{c.blue()});"
+            " border: 2px solid #666; border-radius: 4px; }"
+            f" QPushButton:hover {{ border-color: #aaa; }}"
         )
 
     def _pick_bg_color(self):
