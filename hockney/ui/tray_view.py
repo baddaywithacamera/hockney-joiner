@@ -66,6 +66,7 @@ from PyQt6.QtWidgets import (
     QGraphicsItem,
     QGraphicsLineItem,
     QGraphicsPixmapItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
     QLabel,
@@ -492,6 +493,7 @@ class TrayView(QGraphicsView):
         self._deal_overlay = DealOverlay(self.viewport())
         self._deal_visible_ids: set[str] = set()  # images already dealt onto table
         self._deal_exif_override: dict[str, str] = {}  # batch override for EXIF
+        self._deal_ghost: QGraphicsRectItem | None = None  # ghost outline at target pos
 
         self._configure_view()
 
@@ -893,6 +895,7 @@ class TrayView(QGraphicsView):
         """Exit Deal Mode: reveal any remaining undealt images."""
         # Always hide the overlay (the timer-based finish sets IDLE early)
         self._deal_overlay.hide()
+        self._deal_remove_ghost()
         if self._deal_state == DealState.IDLE and not self._deal_queue:
             return   # already fully cleaned up
 
@@ -949,10 +952,15 @@ class TrayView(QGraphicsView):
                 pixmap, exif, record.source_path.name,
                 self._deal_index + 1, len(self._deal_queue),
             )
+
+            # Show ghost outline at target placement position
+            self._deal_show_ghost(image_id)
+
             self._deal_state = DealState.SHOWING_PREVIEW
 
         elif self._deal_state == DealState.SHOWING_PREVIEW:
             # Single tap places current photo AND loads the next preview.
+            self._deal_remove_ghost()
             image_id = self._deal_queue[self._deal_index]
             item = self._items.get(image_id)
             if item:
@@ -985,6 +993,33 @@ class TrayView(QGraphicsView):
             else:
                 self._deal_state = DealState.WAITING_PREVIEW
                 self._deal_spacebar()  # auto-load next preview
+
+    def _deal_show_ghost(self, image_id: str):
+        """Show a dashed outline rectangle at the target position for the next image."""
+        self._deal_remove_ghost()
+        item = self._items.get(image_id)
+        if not item:
+            return
+        pm = item.pixmap()
+        x, y = item.placement.x, item.placement.y
+        w, h = pm.width(), pm.height()
+
+        ghost = QGraphicsRectItem(x, y, w, h)
+        pen = QPen(QColor(255, 140, 0, 180), 2.0, Qt.PenStyle.DashLine)
+        ghost.setPen(pen)
+        ghost.setBrush(QBrush(QColor(255, 140, 0, 30)))
+        ghost.setZValue(9000)
+        self._scene.addItem(ghost)
+        self._deal_ghost = ghost
+
+        # Scroll the view to show the ghost target area
+        self.centerOn(x + w / 2, y + h / 2)
+
+    def _deal_remove_ghost(self):
+        """Remove the ghost outline from the scene."""
+        if self._deal_ghost is not None:
+            self._scene.removeItem(self._deal_ghost)
+            self._deal_ghost = None
 
     def _animate_item_to(self, item: PhotoItem, start: QPointF, end: QPointF,
                          duration_ms: int = 350):
