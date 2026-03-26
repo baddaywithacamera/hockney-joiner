@@ -758,7 +758,7 @@ class PlacementWorker(QThread):
             log.warning("LightGlue import failed (%s) — falling back to grid", e)
             return self._place_grid(records)
 
-        from PIL import Image as PILImage
+        from PIL import Image as PILImage, ImageOps
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         log.info("Reference-based placement (%s) on device: %s", feature_type, device)
@@ -790,7 +790,8 @@ class PlacementWorker(QThread):
             if self._cancelled:
                 return self._place_grid(records)
             try:
-                pil = PILImage.open(ref.source_path).convert("RGB")
+                pil = PILImage.open(ref.source_path)
+                pil = ImageOps.exif_transpose(pil).convert("RGB")
                 # Resize to preview resolution for better matching
                 w, h = pil.size
                 scale = PREVIEW_LONG_EDGE / max(w, h)
@@ -1117,7 +1118,7 @@ class PlacementWorker(QThread):
         """
         import cv2 as cv2_tmpl
         import numpy as np
-        from PIL import Image as PILImage
+        from PIL import Image as PILImage, ImageOps
 
         refs = self.config.references
         ref_sizes = {}
@@ -1126,7 +1127,8 @@ class PlacementWorker(QThread):
         ref_grey = {}
         for ref in refs:
             try:
-                pil = PILImage.open(ref.source_path).convert("RGB")
+                pil = PILImage.open(ref.source_path)
+                pil = ImageOps.exif_transpose(pil).convert("RGB")
                 w, h = pil.size
                 scale = PREVIEW_LONG_EDGE / max(w, h)
                 new_w, new_h = int(w * scale), int(h * scale)

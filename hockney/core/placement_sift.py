@@ -199,7 +199,7 @@ def place_with_sift(
       placed_count: int
       log_data: dict of per-image match stats for the results log
     """
-    from PIL import Image as PILImage
+    from PIL import Image as PILImage, ImageOps
     from hockney.core.models import ImagePlacement
 
     PREVIEW_LONG_EDGE = 1500
@@ -220,7 +220,8 @@ def place_with_sift(
         if cancel_check and cancel_check():
             return {}, [], 0, log_data
         try:
-            pil = PILImage.open(ref.source_path).convert("RGB")
+            pil = PILImage.open(ref.source_path)
+            pil = ImageOps.exif_transpose(pil).convert("RGB")
             w, h = pil.size
             scale = PREVIEW_LONG_EDGE / max(w, h)
             new_w, new_h = int(w * scale), int(h * scale)
