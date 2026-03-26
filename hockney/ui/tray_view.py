@@ -399,15 +399,20 @@ class RotationHandle(QGraphicsEllipseItem):
 class PhotoItem(QGraphicsPixmapItem):
     """One photograph on the canvas."""
 
+    # Class-level drag opacity (shared by all items, set from sidebar)
+    drag_opacity: float = 0.85
+
     def __init__(self, image_id: str, pixmap: QPixmap, placement: ImagePlacement):
         super().__init__(pixmap)
         self.image_id = image_id
         self.placement = placement
+        self._dragging = False
 
         # Rotate/scale around image centre
         self.setTransformOriginPoint(pixmap.width() / 2, pixmap.height() / 2)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setAcceptHoverEvents(True)
         self._apply_placement()
 
@@ -433,8 +438,20 @@ class PhotoItem(QGraphicsPixmapItem):
     def hide_rotation_handle(self):
         self._rotation_handle.hide_handle()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            if self.drag_opacity < 1.0:
+                self.setOpacity(self.drag_opacity)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+            self._dragging = False
+            self.setOpacity(1.0)
+        super().mouseReleaseEvent(event)
+
     def hoverEnterEvent(self, event):
-        # Brighten border on hover via opacity trick on siblings (handled in TrayView)
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
@@ -874,11 +891,12 @@ class TrayView(QGraphicsView):
 
     def exit_deal_mode(self):
         """Exit Deal Mode: reveal any remaining undealt images."""
-        if self._deal_state == DealState.IDLE:
-            return
+        # Always hide the overlay (the timer-based finish sets IDLE early)
+        self._deal_overlay.hide()
+        if self._deal_state == DealState.IDLE and not self._deal_queue:
+            return   # already fully cleaned up
 
         self._deal_state = DealState.IDLE
-        self._deal_overlay.hide()
 
         # Show all non-removed images
         for iid, item in self._items.items():

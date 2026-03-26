@@ -131,10 +131,12 @@ class Sidebar(QWidget):
 
         layout.addWidget(surface_group)
 
-        # ── Background colour ─────────────────────────────────────────────────
-        bg_group = QGroupBox("Background")
-        bg_layout = QHBoxLayout(bg_group)
+        # ── Background & display ──────────────────────────────────────────────
+        bg_group = QGroupBox("Display")
+        bg_layout = QVBoxLayout(bg_group)
 
+        # Colour row
+        color_row = QHBoxLayout()
         self._bg_color = QColor(28, 28, 28)   # default dark gray
         self._bg_swatch = QPushButton()
         self._bg_swatch.setFixedSize(36, 36)
@@ -143,10 +145,27 @@ class Sidebar(QWidget):
         self._update_swatch()
         self._bg_swatch.setToolTip("Click to pick background colour")
         self._bg_swatch.clicked.connect(self._pick_bg_color)
-        bg_layout.addWidget(self._bg_swatch)
+        color_row.addWidget(self._bg_swatch)
+        color_row.addWidget(QLabel("Canvas colour"))
+        color_row.addStretch()
+        bg_layout.addLayout(color_row)
 
-        bg_layout.addWidget(QLabel("Canvas colour"))
-        bg_layout.addStretch()
+        # Drag opacity row
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(QLabel("Drag opacity:"))
+        self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self._opacity_slider.setRange(20, 100)   # 20%–100%
+        self._opacity_slider.setValue(85)         # default 85%
+        self._opacity_slider.setToolTip(
+            "Opacity of images while being dragged.\n"
+            "Lower = more see-through, letting you peek at layers below."
+        )
+        opacity_row.addWidget(self._opacity_slider)
+        self._opacity_label = QLabel("85%")
+        self._opacity_label.setFixedWidth(32)
+        opacity_row.addWidget(self._opacity_label)
+        self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        bg_layout.addLayout(opacity_row)
 
         layout.addWidget(bg_group)
 
@@ -219,6 +238,12 @@ class Sidebar(QWidget):
             self._bg_color = color
             self._update_swatch()
             self.bg_color_changed.emit(color)
+
+    def _on_opacity_changed(self, value: int):
+        self._opacity_label.setText(f"{value}%")
+        # Update the class-level drag opacity on all PhotoItems
+        from hockney.ui.tray_view import PhotoItem
+        PhotoItem.drag_opacity = value / 100.0
 
     @property
     def bg_color(self) -> QColor:
