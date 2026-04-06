@@ -211,6 +211,17 @@ class MainWindow(QMainWindow):
         # Help menu
         help_menu = menubar.addMenu("&Help")
 
+        help_action = QAction("&Help…", self)
+        help_action.setShortcut(QKeySequence("F1"))
+        help_action.triggered.connect(self._show_help)
+        help_menu.addAction(help_action)
+
+        controls_action = QAction("&Controls Reference…", self)
+        controls_action.triggered.connect(lambda: self._show_help(section=1))
+        help_menu.addAction(controls_action)
+
+        help_menu.addSeparator()
+
         dl_lg = QAction("Download LightGlue (auto-place)…", self)
         dl_lg.triggered.connect(self._start_model_download)
         help_menu.addAction(dl_lg)
@@ -218,6 +229,12 @@ class MainWindow(QMainWindow):
         dl_md = QAction("Download Composition AI…", self)
         dl_md.triggered.connect(self._start_moondream_download)
         help_menu.addAction(dl_md)
+
+        help_menu.addSeparator()
+
+        about_action = QAction("&About Hockney Joiner…", self)
+        about_action.triggered.connect(lambda: self._show_help(section=6))
+        help_menu.addAction(about_action)
 
         view_menu = menubar.addMenu("&View")
 
@@ -806,6 +823,12 @@ class MainWindow(QMainWindow):
             ),
         )
         log.info("Scratch disk changed to: %s", new_path)
+
+    def _show_help(self, section: int = 0):
+        """Help → Help / Controls / About — open the in-app help dialog."""
+        from hockney.ui.help_dialog import HelpDialog
+        dlg = HelpDialog(self, section=section)
+        dlg.exec()
 
     def _reset_panel_layout(self):
         """View → Reset Panel Layout — bring all docks back to defaults."""
