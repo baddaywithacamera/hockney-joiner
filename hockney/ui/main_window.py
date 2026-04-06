@@ -211,10 +211,10 @@ class MainWindow(QMainWindow):
         # Help menu
         help_menu = menubar.addMenu("&Help")
 
-        help_action = QAction("&Help…", self)
-        help_action.setShortcut(QKeySequence("F1"))
-        help_action.triggered.connect(self._show_help)
-        help_menu.addAction(help_action)
+        docs_action = QAction("&Documentation…", self)
+        docs_action.setShortcut(QKeySequence("F1"))
+        docs_action.triggered.connect(self._show_help)
+        help_menu.addAction(docs_action)
 
         controls_action = QAction("&Controls Reference…", self)
         controls_action.triggered.connect(lambda: self._show_help(section=1))
