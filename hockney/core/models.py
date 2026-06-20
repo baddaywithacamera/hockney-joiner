@@ -116,7 +116,7 @@ class ProjectConfig:
     project_name: str = "Untitled"
     project_type: str = "perspective"     # perspective / time_of_day / seasonal
     subject_type: str = "landscape"       # landscape / skylife / urban / indoor / people
-    matching_engine: str = "auto"         # auto / disk_lightglue / sift / orb
+    matching_engine: str = "auto"         # auto / disk_lightglue / sift / orb / llm_director / llm_finetune
     references: list[ReferenceImage] = field(default_factory=list)
 
     def slots_for_type(self, include_advanced: bool = False) -> tuple[str, ...]:

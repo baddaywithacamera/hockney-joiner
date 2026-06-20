@@ -26,13 +26,12 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
+    QDialog,
     QDockWidget,
     QFileDialog,
-    QHBoxLayout,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
-    QSplitter,
     QStatusBar,
     QToolBar,
     QWidget,
@@ -229,6 +228,10 @@ class MainWindow(QMainWindow):
         dl_md = QAction("Download Composition AI…", self)
         dl_md.triggered.connect(self._start_moondream_download)
         help_menu.addAction(dl_md)
+
+        ai_settings_action = QAction("Composition AI Settings…", self)
+        ai_settings_action.triggered.connect(self._show_composition_ai_settings)
+        help_menu.addAction(ai_settings_action)
 
         help_menu.addSeparator()
 
@@ -701,6 +704,14 @@ class MainWindow(QMainWindow):
         progress.close()
         QMessageBox.warning(self, "Download Failed", msg)
 
+    def _show_composition_ai_settings(self):
+        from hockney.ui.composition_ai_dialog import CompositionAISettingsDialog
+        dlg = CompositionAISettingsDialog(self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            from hockney.core.vision_provider import provider_status
+            _, msg = provider_status(models_dir=self.models_dir)
+            self._update_status(msg)
+
     # ── Project config ──────────────────────────────────────────────────────
 
     def _prompt_new_project(self):
@@ -783,6 +794,10 @@ class MainWindow(QMainWindow):
         self.tray_view._placements.clear()
         self.tray_view._removed_ids.clear()
         self.tray_view._active_id = None
+        # scene.clear() deleted these scene items; drop stale refs so later
+        # removeItem() calls don't hit a deleted C++ object.
+        self.tray_view._ref_backdrops = []
+        self.tray_view._deal_ghost = None
         self.tray_view._commands = type(self.tray_view._commands)()  # fresh CommandStack
         self.store.clear()
         self._project_config = None

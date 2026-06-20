@@ -323,7 +323,7 @@ def place_with_sift(
                         continue
 
                     n_inliers = len(inlier_a)
-                    if n_inliers > best_inliers and n_inliers >= min_matches:
+                    if n_inliers > best_inliers:
                         from hockney.core.placement import _homography_center
                         rw, rh = ref_sizes.get(slot, (PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE))
                         # Wider margin for SIFT — its homographies are noisier
@@ -339,11 +339,15 @@ def place_with_sift(
 
                         rot = math.degrees(math.atan2(M[1, 0], M[0, 0]))
 
-                        best_slot = slot
+                        # Record the best *attempt* even when it's below the
+                        # strict threshold, so the relaxed second pass can still
+                        # use its centroid. Only set best_slot (which triggers a
+                        # first-pass placement) when the strict threshold is met.
                         best_inliers = n_inliers
                         best_ref_centroid = (cx, cy)
                         best_rot = rot
                         best_scale = ds
+                        best_slot = slot if n_inliers >= min_matches else None
                 except Exception as e:
                     log.debug("SIFT match %s↔%s@%.0f%% failed: %s",
                               slot, record.id[:6], ds * 100, e)

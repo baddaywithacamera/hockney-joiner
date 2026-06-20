@@ -254,6 +254,8 @@ class Sidebar(QWidget):
             "ORB (fast)",
             "AKAZE (edges)",
             "BRISK (fastest)",
+            "AI Director — full placement (cloud)",
+            "AI Fine-tune — refine local (cloud)",
         ])
         self.engine_combo.setToolTip(
             "Auto tries GPU engines + SIFT, picks best.\n"
@@ -264,7 +266,10 @@ class Sidebar(QWidget):
             "SIFT: classic CPU-only, scale-invariant.\n"
             "ORB: fast CPU, good for strong corners.\n"
             "AKAZE: nonlinear diffusion, good on blurry images.\n"
-            "BRISK: fastest CPU option."
+            "BRISK: fastest CPU option.\n"
+            "AI Director: a cloud LLM (Claude/Gemini) arranges every tile.\n"
+            "AI Fine-tune: runs a local engine, then the LLM nudges misaligned tiles.\n"
+            "  (Both need an API key — set in Help → Composition AI Settings.)"
         )
         engine_layout.addWidget(self.engine_combo)
         layout.addWidget(engine_group)
@@ -368,6 +373,8 @@ class Sidebar(QWidget):
         6: "orb",
         7: "akaze",
         8: "brisk",
+        9: "llm_director",
+        10: "llm_finetune",
     }
 
     def selected_engine(self) -> str:

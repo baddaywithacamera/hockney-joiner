@@ -294,7 +294,8 @@ class ImageStore:
         if not record or not record.preview_path.exists():
             return None
 
-        arr = np.array(Image.open(record.preview_path).convert("RGB"))
+        with Image.open(record.preview_path) as im:
+            arr = np.array(im.convert("RGB"))
         self._preview_lru.put(image_id, arr)
         return arr
 
@@ -339,9 +340,8 @@ class ImageStore:
             self._records[record.id] = record
             # Reload thumbnail into RAM from scratch disk
             if record.thumb_path.exists():
-                self._thumb_cache[record.id] = np.array(
-                    Image.open(record.thumb_path).convert("RGB")
-                )
+                with Image.open(record.thumb_path) as im:
+                    self._thumb_cache[record.id] = np.array(im.convert("RGB"))
 
     # ── Cleanup ────────────────────────────────────────────────────────────────
 
@@ -372,9 +372,9 @@ def _open_image(path: Path) -> Image.Image:
     """Open an image file. Uses rawpy for RAW formats if available."""
     suffix = path.suffix.lower()
     if suffix in {".jpg", ".jpeg", ".png", ".tif", ".tiff"}:
-        img = Image.open(path)
-        img = ImageOps.exif_transpose(img)  # honour EXIF rotation
-        return img.convert("RGB")
+        with Image.open(path) as img:
+            img = ImageOps.exif_transpose(img)  # honour EXIF rotation
+            return img.convert("RGB")
 
     if RAW_AVAILABLE:
         import rawpy
@@ -402,44 +402,44 @@ def get_exif_info(source_path: Path) -> dict[str, str]:
     """
     info: dict[str, str] = {}
     try:
-        img = Image.open(source_path)
-        exif = img.getexif()
-        if not exif:
-            return info
+        with Image.open(source_path) as img:
+            exif = img.getexif()
+            if not exif:
+                return info
 
-        # ExposureTime (tag 33434)
-        val = exif.get(33434)
-        if val is not None:
-            if hasattr(val, 'numerator'):
-                if val.numerator and val.denominator:
-                    if val.numerator / val.denominator < 1:
-                        info["shutter"] = f"{val.numerator}/{val.denominator}s"
-                    else:
-                        info["shutter"] = f"{float(val):.1f}s"
-            elif isinstance(val, (int, float)):
-                info["shutter"] = f"1/{int(1/val)}s" if val < 1 else f"{val:.1f}s"
+            # ExposureTime (tag 33434)
+            val = exif.get(33434)
+            if val is not None:
+                if hasattr(val, 'numerator'):
+                    if val.numerator and val.denominator:
+                        if val.numerator / val.denominator < 1:
+                            info["shutter"] = f"{val.numerator}/{val.denominator}s"
+                        else:
+                            info["shutter"] = f"{float(val):.1f}s"
+                elif isinstance(val, (int, float)) and val > 0:
+                    info["shutter"] = f"1/{int(1/val)}s" if val < 1 else f"{val:.1f}s"
 
-        # FNumber (tag 33437)
-        val = exif.get(33437)
-        if val is not None:
-            f_num = float(val) if not hasattr(val, 'numerator') else val.numerator / val.denominator
-            info["aperture"] = f"f/{f_num:.1f}"
+            # FNumber (tag 33437)
+            val = exif.get(33437)
+            if val is not None:
+                f_num = float(val) if not hasattr(val, 'numerator') else val.numerator / val.denominator
+                info["aperture"] = f"f/{f_num:.1f}"
 
-        # ISOSpeedRatings (tag 34855)
-        val = exif.get(34855)
-        if val is not None:
-            info["iso"] = f"ISO {val}"
+            # ISOSpeedRatings (tag 34855)
+            val = exif.get(34855)
+            if val is not None:
+                info["iso"] = f"ISO {val}"
 
-        # FocalLength (tag 37386)
-        val = exif.get(37386)
-        if val is not None:
-            fl = float(val) if not hasattr(val, 'numerator') else val.numerator / val.denominator
-            info["focal_length"] = f"{fl:.0f}mm"
+            # FocalLength (tag 37386)
+            val = exif.get(37386)
+            if val is not None:
+                fl = float(val) if not hasattr(val, 'numerator') else val.numerator / val.denominator
+                info["focal_length"] = f"{fl:.0f}mm"
 
-        # DateTimeOriginal (tag 36867)
-        val = exif.get(36867)
-        if val is not None:
-            info["date"] = str(val)
+            # DateTimeOriginal (tag 36867)
+            val = exif.get(36867)
+            if val is not None:
+                info["date"] = str(val)
 
     except Exception as e:
         log.debug("EXIF read failed for %s: %s", source_path, e)

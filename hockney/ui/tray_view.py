@@ -662,7 +662,10 @@ class TrayView(QGraphicsView):
         """Remove any existing reference backdrops from the scene."""
         if hasattr(self, '_ref_backdrops'):
             for item in self._ref_backdrops:
-                self._scene.removeItem(item)
+                try:
+                    self._scene.removeItem(item)
+                except RuntimeError:
+                    pass  # already deleted by a prior scene.clear()
             self._ref_backdrops.clear()
 
     def refresh(self):
@@ -670,6 +673,11 @@ class TrayView(QGraphicsView):
         self._scene.clear()
         self._items.clear()
         self._active_id = None
+        # scene.clear() already deleted these scene items; drop the stale Python
+        # refs so we never call removeItem() on a deleted C++ object later
+        # (which raises "wrapped C/C++ object … deleted").
+        self._ref_backdrops = []
+        self._deal_ghost = None
 
         for record in self.store.all_records():
             if record.id in self._removed_ids:
@@ -1282,7 +1290,10 @@ class TrayView(QGraphicsView):
     def _deal_remove_ghost(self):
         """Remove the ghost outline from the scene."""
         if self._deal_ghost is not None:
-            self._scene.removeItem(self._deal_ghost)
+            try:
+                self._scene.removeItem(self._deal_ghost)
+            except RuntimeError:
+                pass  # already deleted by a prior scene.clear()
             self._deal_ghost = None
 
     def _animate_item_to(self, item: PhotoItem, start: QPointF, end: QPointF,
@@ -1370,12 +1381,11 @@ class TrayView(QGraphicsView):
             return
         snap_before = [self._snapshot_one(i.image_id) for i in pile]
 
-        # Collect the current z_orders and rotate them
+        # Collect the current z_orders and rotate them.
+        # Move top to bottom: [1,2,3] → [3,1,2] (highest z wraps to lowest,
+        # everyone else shifts up one), exposing the next card in the pile.
         z_values = [i.placement.z_order for i in pile]
-        # Move top to bottom: [1,2,3] → [3,1,2] (highest z goes to lowest)
         rotated = [z_values[-1]] + z_values[:-1]
-        # Swap: bottom gets top's z, everyone else shifts down
-        rotated = z_values[1:] + [z_values[0]]
 
         for item, new_z in zip(pile, rotated):
             item.placement.z_order = new_z

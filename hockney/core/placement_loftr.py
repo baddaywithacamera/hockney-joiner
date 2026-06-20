@@ -245,7 +245,7 @@ def place_with_loftr(
                     inlier_idx = mask.ravel().astype(bool)
                     n_inliers = int(inlier_idx.sum())
 
-                    if n_inliers > best_inliers and n_inliers >= min_matches:
+                    if n_inliers > best_inliers:
                         # Homography: map detail center → reference
                         inlier_det = kp_det_scaled[inlier_idx]
                         inlier_ref = kp_ref_scaled[inlier_idx]
@@ -267,11 +267,14 @@ def place_with_loftr(
 
                         rot = math.degrees(math.atan2(M[1, 0], M[0, 0]))
 
-                        best_slot = slot
+                        # Record the best attempt even below the strict threshold
+                        # so the relaxed second pass can use it; only set best_slot
+                        # (first-pass placement) when the strict threshold is met.
                         best_inliers = n_inliers
                         best_ref_point = (cx, cy)
                         best_rot = rot
                         best_scale = ds
+                        best_slot = slot if n_inliers >= min_matches else None
 
                 except Exception as e:
                     log.debug("LoFTR match %s↔%s@%.0f%% failed: %s",

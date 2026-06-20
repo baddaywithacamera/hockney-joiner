@@ -229,7 +229,7 @@ def place_with_orb(
                         continue
 
                     n_inliers = len(inlier_a)
-                    if n_inliers > best_inliers and n_inliers >= min_matches:
+                    if n_inliers > best_inliers:
                         from hockney.core.placement import _homography_center
                         rw, rh = ref_sizes.get(slot, (PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE))
                         center = _homography_center(
@@ -243,11 +243,14 @@ def place_with_orb(
 
                         rot = math.degrees(math.atan2(M[1, 0], M[0, 0]))
 
-                        best_slot = slot
+                        # Record the best attempt even below the strict threshold
+                        # so the relaxed second pass can use it; only set best_slot
+                        # (first-pass placement) when the strict threshold is met.
                         best_inliers = n_inliers
                         best_ref_centroid = (cx, cy)
                         best_rot = rot
                         best_scale = ds
+                        best_slot = slot if n_inliers >= min_matches else None
                 except Exception as e:
                     log.debug("ORB match %s<>%s@%.0f%% failed: %s",
                               slot, record.id[:6], ds * 100, e)

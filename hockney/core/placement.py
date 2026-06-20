@@ -175,7 +175,9 @@ class PlacementWorker(QThread):
             project_name=self.config.project_name if self.config else "",
         )
 
-        if has_refs:
+        if engine in ("llm_director", "llm_finetune"):
+            result = self._place_with_llm(records, engine, plog, has_refs)
+        elif has_refs:
             result = self._place_with_references_dispatched(records, engine, plog)
         elif self.model_ready:
             result = self._place_lightglue(records)
@@ -184,6 +186,78 @@ class PlacementWorker(QThread):
 
         if not self._cancelled:
             self.finished.emit(result)
+
+    # ── LLM placement (Phase 2, optional cloud) ────────────────────────────────
+
+    def _reference_pil_images(self):
+        """Load reference images (if any) as PIL images for the LLM director."""
+        imgs = []
+        if not (self.config and self.config.references):
+            return imgs
+        try:
+            from PIL import Image, ImageOps
+        except Exception:
+            return imgs
+        for ref in self.config.references:
+            path = getattr(ref, "source_path", "")
+            if not path:
+                continue
+            try:
+                im = Image.open(path)
+                im = ImageOps.exif_transpose(im).convert("RGB")
+                imgs.append(im)
+            except Exception as e:
+                log.warning("Could not load reference %s: %s", path, e)
+        return imgs
+
+    def _place_with_llm(self, records, engine: str, plog, has_refs: bool) -> PlacementResult:
+        from hockney.core.vision_provider import get_placement_provider, ProviderError
+        from hockney.core import placement_director as director
+
+        provider = get_placement_provider()
+        if provider is None:
+            r = self._place_grid(records)
+            r.message = (
+                "LLM placement needs a cloud provider. Add a Claude or Gemini API "
+                "key in Help → Composition AI Settings. Grid layout applied for now."
+            )
+            return r
+
+        refs = self._reference_pil_images() if has_refs else []
+        progress_cb = self.progress.emit
+
+        def cancel_cb():
+            return self._cancelled
+
+        try:
+            if engine == "llm_finetune":
+                # Build a local base placement first, then let the LLM refine it.
+                if has_refs:
+                    base = self._place_with_references_dispatched(records, "auto", plog)
+                elif self.model_ready:
+                    base = self._place_lightglue(records)
+                else:
+                    base = self._place_grid(records)
+                if self._cancelled:
+                    return base
+                return director.finetune(
+                    records, self.store, provider, base,
+                    progress_cb=progress_cb, cancel_cb=cancel_cb, refs=refs,
+                )
+            # llm_director — LLM does the whole placement.
+            return director.direct_full(
+                records, self.store, provider,
+                progress_cb=progress_cb, cancel_cb=cancel_cb, refs=refs,
+            )
+        except ProviderError as e:
+            r = self._place_grid(records)
+            r.message = f"LLM placement failed: {e} Grid layout applied."
+            return r
+        except Exception as e:  # noqa: BLE001 - never crash the worker thread
+            log.exception("LLM placement error")
+            r = self._place_grid(records)
+            r.message = f"LLM placement error: {e}. Grid layout applied."
+            return r
 
     # ── Engine dispatch ──────────────────────────────────────────────────────
 
@@ -962,7 +1036,7 @@ class PlacementWorker(QThread):
                         inlier_idx = inlier_mask.ravel().astype(bool)
                         n_inliers = int(inlier_idx.sum())
 
-                        if n_inliers > best_inliers and n_inliers >= self._min_matches:
+                        if n_inliers > best_inliers:
                             inlier_det = m_kp_det[inlier_idx]
                             inlier_ref = m_kp_ref[inlier_idx]
 
@@ -975,11 +1049,15 @@ class PlacementWorker(QThread):
 
                             rot = math.degrees(math.atan2(M[1, 0], M[0, 0]))
 
-                            best_slot = slot
+                            # Record the best attempt even below the strict
+                            # threshold so the relaxed second pass can use it;
+                            # only set best_slot (first-pass placement) when the
+                            # strict threshold is met.
                             best_inliers = n_inliers
                             best_ref_centroid = (cx, cy)
                             best_rot = rot
                             best_detail_size = (dw, dh)
+                            best_slot = slot if n_inliers >= self._min_matches else None
                     except Exception as e:
                         log.debug("Match %s↔%s@%.0f%% failed: %s",
                                   slot, record.id[:6], ds * 100, e)
@@ -1330,9 +1408,12 @@ def _spread_overlaps(placements: dict[str, ImagePlacement],
                     perp_x = -ny * jitter
                     perp_y = nx * jitter
 
+                    # Push the pair equal-and-opposite along the separation axis
+                    # AND the perpendicular jitter axis, so the jitter spreads the
+                    # two tiles apart rather than nudging both the same way.
                     half_push = this_push * 0.5
-                    p_a.x -= nx * half_push - perp_x
-                    p_a.y -= ny * half_push - perp_y
+                    p_a.x -= nx * half_push + perp_x
+                    p_a.y -= ny * half_push + perp_y
                     p_a.auto_x = p_a.x
                     p_a.auto_y = p_a.y
                     p_b.x += nx * half_push + perp_x

@@ -93,17 +93,49 @@ class VisionQueryWorker(QThread):
     indices = pyqtSignal(list)       # list[int] of 1-based image indices mentioned
     error = pyqtSignal(str)
 
-    def __init__(self, image, question: str, models_dir: Path):
+    def __init__(self, image, question: str, models_dir: Path, n_images: int = 0):
         """
         image: PIL Image (the contact sheet or composite)
         question: plain language question from the user
+        models_dir: location of the local BLIP cache (used only for the local path)
+        n_images: number of tiles on the contact sheet, used to bound/validate
+                  any tile indices the model returns. 0 means "unknown".
         """
         super().__init__()
         self._image = image
         self._question = question
         self._models_dir = models_dir
+        self._n_images = n_images
 
     def run(self):
+        from hockney.core.vision_provider import get_provider, ProviderError
+
+        # Cloud path (Claude / Gemini) when one is selected & configured.
+        provider = None
+        try:
+            provider = get_provider()
+        except Exception as e:  # config resolution should never hard-fail
+            log.warning("Provider resolution failed, falling back to local: %s", e)
+
+        if provider is not None:
+            try:
+                result = provider.query(self._image, self._question, self._n_images)
+            except ProviderError as e:
+                self.error.emit(str(e))
+                return
+            except Exception as e:  # noqa: BLE001 - surface anything unexpected to the UI
+                self.error.emit(f"{provider.name.title()} query failed: {e}")
+                return
+            log.info("%s answer: %s", provider.name, result["answer"][:120])
+            self.finished.emit(result["answer"])
+            if result["indices"]:
+                self.indices.emit(result["indices"])
+            return
+
+        # Local offline path (BLIP-VQA).
+        self._run_local()
+
+    def _run_local(self):
         if not _ensure_deps():
             self.error.emit(
                 "Could not install transformers.\n"
@@ -125,20 +157,19 @@ class VisionQueryWorker(QThread):
         log.info("BLIP answer: %s", answer[:120])
         self.finished.emit(answer)
 
-        found = _extract_indices(answer)
+        found = _extract_indices(answer, self._n_images)
         if found:
             self.indices.emit(found)
 
 
-def _extract_indices(text: str) -> list[int]:
+def _extract_indices(text: str, n_images: int = 0) -> list[int]:
     """
-    Parse image index numbers from the model's response.
-    Handles: "images 3, 7 and 12", "image 4", "#5", "number 2", etc.
-    Returns sorted list of 1-based integers.
+    Parse image index numbers from the local model's response, bounded by the
+    number of tiles so stray numbers (years, f-stops) aren't treated as tiles.
     """
+    bound = n_images if n_images and n_images > 0 else 9999
     numbers = re.findall(r"\b(\d+)\b", text)
-    indices = sorted(set(int(n) for n in numbers if 1 <= int(n) <= 9999))
-    return indices
+    return sorted({int(n) for n in numbers if 1 <= int(n) <= bound})
 
 
 # ── Download worker ───────────────────────────────────────────────────────────

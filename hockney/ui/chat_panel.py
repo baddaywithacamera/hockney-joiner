@@ -103,10 +103,12 @@ class ChatPanel(QWidget):
             self._set_status("No tray view connected.")
             return
 
-        from hockney.core.vision_chat import is_moondream_ready, VisionQueryWorker
+        from hockney.core.vision_chat import VisionQueryWorker
+        from hockney.core.vision_provider import provider_status
 
-        if not is_moondream_ready(self.models_dir):
-            self._append("⚠ Composition AI not downloaded. Use Help → Download Composition AI.")
+        ok, msg = provider_status(models_dir=self.models_dir)
+        if not ok:
+            self._append(f"⚠ {msg}")
             return
 
         sheet = self._tray_view.render_contact_sheet()
@@ -114,12 +116,14 @@ class ChatPanel(QWidget):
             self._append("⚠ No images loaded.")
             return
 
+        n_images = len(self._tray_view.all_placements())
+
         self._append(f"You: {question}")
         self._input.clear()
         self._send_btn.setEnabled(False)
         self._set_status("Thinking…")
 
-        self._worker = VisionQueryWorker(sheet, question, self.models_dir)
+        self._worker = VisionQueryWorker(sheet, question, self.models_dir, n_images=n_images)
         self._worker.finished.connect(self._on_answer)
         self._worker.indices.connect(self._on_indices)
         self._worker.error.connect(self._on_error)
